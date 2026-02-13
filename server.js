@@ -2,6 +2,10 @@ import express from "express";
 import cors from "cors";
 import mongoose from "mongoose";
 import dotenv from "dotenv";
+import fs from "fs";
+import path from "path";
+import multer from "multer";
+import sharp from "sharp";
 
 dotenv.config();
 
@@ -10,12 +14,52 @@ const app = express();
 // Dev-friendly CORS (you can restrict later)
 app.use(cors());
 app.use(express.json());
+app.set("trust proxy", 1);
+
+// Create uploads folder
+const UPLOADS_DIR = path.join(process.cwd(), "uploads");
+if (!fs.existsSync(UPLOADS_DIR)) fs.mkdirSync(UPLOADS_DIR, { recursive: true });
+
+// Serve uploaded files publicly
+app.use("/uploads", express.static(UPLOADS_DIR));
 
 // ---------- Mongo ----------
 await mongoose.connect(process.env.MONGODB_URI);
 console.log("Mongo connected");
 
 // ---------- Models ----------
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 5 * 1024 * 1024 }, // 5 MB
+  fileFilter: (req, file, cb) => {
+    const ok = file.mimetype && file.mimetype.startsWith("image/");
+    cb(ok ? null : new Error("Only image files are allowed"), ok);
+  },
+});
+
+app.post("/api/uploads/image", upload.single("file"), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: "No file uploaded" });
+
+    // Convert to webp (smaller + faster)
+    const filename = `${crypto.randomUUID()}.webp`;
+    const outPath = path.join(UPLOADS_DIR, filename);
+
+    await sharp(req.file.buffer)
+      .rotate()
+      .resize({ width: 2000, withoutEnlargement: true }) // optional safety
+      .webp({ quality: 82 })
+      .toFile(outPath);
+
+    const baseUrl = `${req.protocol}://${req.get("host")}`;
+    const url = `${baseUrl}/uploads/${filename}`;
+
+    res.json({ url, filename });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Upload failed" });
+  }
+});
 
 // Language (your existing idea)
 const LanguageSchema = new mongoose.Schema(
@@ -133,6 +177,54 @@ app.get("/api/pages/slug/:slug", async (req, res) => {
   const doc = await Page.findOne({ slug });
   if (!doc) return res.status(404).json({ error: "Not found" });
   res.json(toClientPage(doc));
+});
+// Update ONE section (partial) by sectionId
+app.patch("/api/pages/:id/sections/:sectionId", async (req, res) => {
+  try {
+    const { id, sectionId } = req.params;
+
+    const updates = {};
+
+    // Optional: allow enabled/template updates
+    if (typeof req.body.enabled !== "undefined") {
+      updates["sections.$.enabled"] = !!req.body.enabled;
+    }
+    if (typeof req.body.template !== "undefined") {
+      updates["sections.$.template"] = String(req.body.template);
+    }
+
+    // Partial config updates
+    if (req.body.config && typeof req.body.config === "object") {
+      for (const [k, v] of Object.entries(req.body.config)) {
+        updates[`sections.$.config.${k}`] = v;
+      }
+    }
+
+    // Partial style updates
+    if (req.body.style && typeof req.body.style === "object") {
+      for (const [k, v] of Object.entries(req.body.style)) {
+        updates[`sections.$.style.${k}`] = v;
+      }
+    }
+
+    if (Object.keys(updates).length === 0) {
+      return res.status(400).json({ error: "No updates provided" });
+    }
+
+    const doc = await Page.findOneAndUpdate(
+      { _id: id, "sections.id": sectionId },
+      { $set: updates },
+      { new: true, runValidators: true }
+    );
+
+    if (!doc) return res.status(404).json({ error: "Not found" });
+
+    const updatedSection = (doc.sections || []).find((s) => s.id === sectionId);
+    res.json({ section: updatedSection, updatedAt: doc.updatedAt });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Server error" });
+  }
 });
 
 // Create page
