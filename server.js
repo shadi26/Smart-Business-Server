@@ -6,7 +6,7 @@ import fs from "fs";
 import path from "path";
 import multer from "multer";
 import sharp from "sharp";
-
+import { randomUUID } from "crypto";
 dotenv.config();
 
 const app = express();
@@ -42,7 +42,7 @@ app.post("/api/uploads/image", upload.single("file"), async (req, res) => {
     if (!req.file) return res.status(400).json({ error: "No file uploaded" });
 
     // Convert to webp (smaller + faster)
-    const filename = `${crypto.randomUUID()}.webp`;
+    const filename = `${randomUUID()}.webp`;
     const outPath = path.join(UPLOADS_DIR, filename);
 
     await sharp(req.file.buffer)
@@ -194,11 +194,76 @@ app.patch("/api/pages/:id/sections/:sectionId", async (req, res) => {
     }
 
     // Partial config updates
-    if (req.body.config && typeof req.body.config === "object") {
-      for (const [k, v] of Object.entries(req.body.config)) {
-        updates[`sections.$.config.${k}`] = v;
+    // Update ONE section (partial OR replace) by sectionId
+app.patch("/api/pages/:id/sections/:sectionId", async (req, res) => {
+  try {
+    const { id, sectionId } = req.params;
+
+    const updates = {};
+
+    // Optional: allow enabled/template updates
+    if (typeof req.body.enabled !== "undefined") {
+      updates["sections.$.enabled"] = !!req.body.enabled;
+    }
+    if (typeof req.body.template !== "undefined") {
+      updates["sections.$.template"] = String(req.body.template);
+    }
+
+    const replaceConfig = req.body.replaceConfig === true;
+    const replaceStyle = req.body.replaceStyle === true;
+
+    // Replace entire config (clears old keys)
+    if (replaceConfig) {
+      const nextCfg =
+        req.body.config && typeof req.body.config === "object" && !Array.isArray(req.body.config)
+          ? req.body.config
+          : {};
+      updates["sections.$.config"] = nextCfg;
+    } else {
+      // Partial config updates
+      if (req.body.config && typeof req.body.config === "object") {
+        for (const [k, v] of Object.entries(req.body.config)) {
+          updates[`sections.$.config.${k}`] = v;
+        }
       }
     }
+
+    // Replace entire style (clears old keys)
+    if (replaceStyle) {
+      const nextStyle =
+        req.body.style && typeof req.body.style === "object" && !Array.isArray(req.body.style)
+          ? req.body.style
+          : {};
+      updates["sections.$.style"] = nextStyle;
+    } else {
+      // Partial style updates
+      if (req.body.style && typeof req.body.style === "object") {
+        for (const [k, v] of Object.entries(req.body.style)) {
+          updates[`sections.$.style.${k}`] = v;
+        }
+      }
+    }
+
+    if (Object.keys(updates).length === 0) {
+      return res.status(400).json({ error: "No updates provided" });
+    }
+
+    const doc = await Page.findOneAndUpdate(
+      { _id: id, "sections.id": sectionId },
+      { $set: updates },
+      { new: true, runValidators: true }
+    );
+
+    if (!doc) return res.status(404).json({ error: "Not found" });
+
+    const updatedSection = (doc.sections || []).find((s) => s.id === sectionId);
+    res.json({ section: updatedSection, updatedAt: doc.updatedAt });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
 
     // Partial style updates
     if (req.body.style && typeof req.body.style === "object") {
