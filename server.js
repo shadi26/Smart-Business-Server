@@ -7,27 +7,23 @@ import path from "path";
 import multer from "multer";
 import sharp from "sharp";
 import { randomUUID } from "crypto";
+
 dotenv.config();
 
 const app = express();
 
-// Dev-friendly CORS (you can restrict later)
+// Dev-friendly CORS (restrict later if you want)
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: "2mb" }));
 app.set("trust proxy", 1);
 
-// Create uploads folder
+// -------------------- Uploads --------------------
 const UPLOADS_DIR = path.join(process.cwd(), "uploads");
 if (!fs.existsSync(UPLOADS_DIR)) fs.mkdirSync(UPLOADS_DIR, { recursive: true });
 
 // Serve uploaded files publicly
 app.use("/uploads", express.static(UPLOADS_DIR));
 
-// ---------- Mongo ----------
-await mongoose.connect(process.env.MONGODB_URI);
-console.log("Mongo connected");
-
-// ---------- Models ----------
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 5 * 1024 * 1024 }, // 5 MB
@@ -41,13 +37,12 @@ app.post("/api/uploads/image", upload.single("file"), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: "No file uploaded" });
 
-    // Convert to webp (smaller + faster)
     const filename = `${randomUUID()}.webp`;
     const outPath = path.join(UPLOADS_DIR, filename);
 
     await sharp(req.file.buffer)
       .rotate()
-      .resize({ width: 2000, withoutEnlargement: true }) // optional safety
+      .resize({ width: 2000, withoutEnlargement: true })
       .webp({ quality: 82 })
       .toFile(outPath);
 
@@ -60,6 +55,17 @@ app.post("/api/uploads/image", upload.single("file"), async (req, res) => {
     res.status(500).json({ error: "Upload failed" });
   }
 });
+
+// -------------------- Mongo --------------------
+if (!process.env.MONGODB_URI) {
+  console.error("Missing MONGODB_URI in .env");
+  process.exit(1);
+}
+
+await mongoose.connect(process.env.MONGODB_URI);
+console.log("Mongo connected");
+
+// -------------------- Models --------------------
 
 // Language (your existing idea)
 const LanguageSchema = new mongoose.Schema(
@@ -81,22 +87,47 @@ const SectionSchema = new mongoose.Schema(
   { _id: false }
 );
 
+// ✅ NEW: nav/footer reusable schema
+const BlockSchema = new mongoose.Schema(
+  {
+    enabled: { type: Boolean, default: true },
+    template: { type: String, default: "template1" },
+    config: { type: mongoose.Schema.Types.Mixed, default: {} },
+    style: { type: mongoose.Schema.Types.Mixed, default: {} },
+  },
+  { _id: false }
+);
+
 const PageSchema = new mongoose.Schema(
   {
     name: { type: String, required: true },
     slug: { type: String, required: true, unique: true, index: true },
     sections: { type: [SectionSchema], default: [] },
+
+    // ✅ NEW:
+    nav: { type: BlockSchema, default: null },
+    footer: { type: BlockSchema, default: null },
   },
   { timestamps: true, collection: "pages" }
 );
 
 const Page = mongoose.model("Page", PageSchema);
 
-// ---------- Helpers ----------
+// -------------------- Helpers --------------------
 const RESERVED_SLUGS = new Set([
   "",
-  "home", "about", "contact", "booking", "portfolio", "sales", "bio", "modern", "payment",
-  "admin", "admin-preview", "preview",
+  "home",
+  "about",
+  "contact",
+  "booking",
+  "portfolio",
+  "sales",
+  "bio",
+  "modern",
+  "payment",
+  "admin",
+  "admin-preview",
+  "preview",
 ]);
 
 function normalizeSlug(slug) {
@@ -119,12 +150,49 @@ function toClientPage(doc) {
     name: obj.name,
     slug: obj.slug,
     sections: obj.sections || [],
+
+    // ✅ include nav/footer so client can render real DB values
+    nav: obj.nav || null,
+    footer: obj.footer || null,
+
     createdAt: obj.createdAt,
     updatedAt: obj.updatedAt,
   };
 }
 
-// ---------- Language Routes ----------
+function isPlainObject(v) {
+  return !!v && typeof v === "object" && !Array.isArray(v);
+}
+
+function buildBlockUpdates(prefix, body) {
+  const updates = {};
+
+  if (typeof body.enabled !== "undefined") updates[`${prefix}.enabled`] = !!body.enabled;
+  if (typeof body.template !== "undefined") updates[`${prefix}.template`] = String(body.template);
+
+  const replaceConfig = body.replaceConfig === true;
+  const replaceStyle = body.replaceStyle === true;
+
+  if (replaceConfig) {
+    updates[`${prefix}.config`] = isPlainObject(body.config) ? body.config : {};
+  } else if (isPlainObject(body.config)) {
+    for (const [k, v] of Object.entries(body.config)) {
+      updates[`${prefix}.config.${k}`] = v;
+    }
+  }
+
+  if (replaceStyle) {
+    updates[`${prefix}.style`] = isPlainObject(body.style) ? body.style : {};
+  } else if (isPlainObject(body.style)) {
+    for (const [k, v] of Object.entries(body.style)) {
+      updates[`${prefix}.style.${k}`] = v;
+    }
+  }
+
+  return updates;
+}
+
+// -------------------- Language Routes --------------------
 app.get("/api/seed-language", async (req, res) => {
   const doc = await Language.create({
     _id: "en",
@@ -147,7 +215,7 @@ app.get("/api/language/:lang", async (req, res) => {
   res.json(doc);
 });
 
-// ---------- Pages Routes ----------
+// -------------------- Pages Routes --------------------
 
 // List pages
 app.get("/api/pages", async (req, res) => {
@@ -158,6 +226,8 @@ app.get("/api/pages", async (req, res) => {
       name: p.name,
       slug: p.slug,
       sections: p.sections || [],
+      nav: p.nav || null,
+      footer: p.footer || null,
       createdAt: p.createdAt,
       updatedAt: p.updatedAt,
     }))
@@ -166,9 +236,13 @@ app.get("/api/pages", async (req, res) => {
 
 // Get page by id
 app.get("/api/pages/:id", async (req, res) => {
-  const doc = await Page.findById(req.params.id);
-  if (!doc) return res.status(404).json({ error: "Not found" });
-  res.json(toClientPage(doc));
+  try {
+    const doc = await Page.findById(req.params.id);
+    if (!doc) return res.status(404).json({ error: "Not found" });
+    res.json(toClientPage(doc));
+  } catch (e) {
+    return res.status(400).json({ error: "Invalid id" });
+  }
 });
 
 // Get page by slug
@@ -178,30 +252,14 @@ app.get("/api/pages/slug/:slug", async (req, res) => {
   if (!doc) return res.status(404).json({ error: "Not found" });
   res.json(toClientPage(doc));
 });
-// Update ONE section (partial) by sectionId
+
+// Update ONE section (partial OR replace) by sectionId
 app.patch("/api/pages/:id/sections/:sectionId", async (req, res) => {
   try {
     const { id, sectionId } = req.params;
 
     const updates = {};
 
-    // Optional: allow enabled/template updates
-    if (typeof req.body.enabled !== "undefined") {
-      updates["sections.$.enabled"] = !!req.body.enabled;
-    }
-    if (typeof req.body.template !== "undefined") {
-      updates["sections.$.template"] = String(req.body.template);
-    }
-
-    // Partial config updates
-    // Update ONE section (partial OR replace) by sectionId
-app.patch("/api/pages/:id/sections/:sectionId", async (req, res) => {
-  try {
-    const { id, sectionId } = req.params;
-
-    const updates = {};
-
-    // Optional: allow enabled/template updates
     if (typeof req.body.enabled !== "undefined") {
       updates["sections.$.enabled"] = !!req.body.enabled;
     }
@@ -212,61 +270,19 @@ app.patch("/api/pages/:id/sections/:sectionId", async (req, res) => {
     const replaceConfig = req.body.replaceConfig === true;
     const replaceStyle = req.body.replaceStyle === true;
 
-    // Replace entire config (clears old keys)
     if (replaceConfig) {
-      const nextCfg =
-        req.body.config && typeof req.body.config === "object" && !Array.isArray(req.body.config)
-          ? req.body.config
-          : {};
+      const nextCfg = isPlainObject(req.body.config) ? req.body.config : {};
       updates["sections.$.config"] = nextCfg;
-    } else {
-      // Partial config updates
-      if (req.body.config && typeof req.body.config === "object") {
-        for (const [k, v] of Object.entries(req.body.config)) {
-          updates[`sections.$.config.${k}`] = v;
-        }
+    } else if (isPlainObject(req.body.config)) {
+      for (const [k, v] of Object.entries(req.body.config)) {
+        updates[`sections.$.config.${k}`] = v;
       }
     }
 
-    // Replace entire style (clears old keys)
     if (replaceStyle) {
-      const nextStyle =
-        req.body.style && typeof req.body.style === "object" && !Array.isArray(req.body.style)
-          ? req.body.style
-          : {};
+      const nextStyle = isPlainObject(req.body.style) ? req.body.style : {};
       updates["sections.$.style"] = nextStyle;
-    } else {
-      // Partial style updates
-      if (req.body.style && typeof req.body.style === "object") {
-        for (const [k, v] of Object.entries(req.body.style)) {
-          updates[`sections.$.style.${k}`] = v;
-        }
-      }
-    }
-
-    if (Object.keys(updates).length === 0) {
-      return res.status(400).json({ error: "No updates provided" });
-    }
-
-    const doc = await Page.findOneAndUpdate(
-      { _id: id, "sections.id": sectionId },
-      { $set: updates },
-      { new: true, runValidators: true }
-    );
-
-    if (!doc) return res.status(404).json({ error: "Not found" });
-
-    const updatedSection = (doc.sections || []).find((s) => s.id === sectionId);
-    res.json({ section: updatedSection, updatedAt: doc.updatedAt });
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: "Server error" });
-  }
-});
-
-
-    // Partial style updates
-    if (req.body.style && typeof req.body.style === "object") {
+    } else if (isPlainObject(req.body.style)) {
       for (const [k, v] of Object.entries(req.body.style)) {
         updates[`sections.$.style.${k}`] = v;
       }
@@ -292,6 +308,38 @@ app.patch("/api/pages/:id/sections/:sectionId", async (req, res) => {
   }
 });
 
+// ✅ PATCH nav (autosave)
+app.patch("/api/pages/:id/nav", async (req, res) => {
+  try {
+    const updates = buildBlockUpdates("nav", req.body || {});
+    if (Object.keys(updates).length === 0) return res.status(400).json({ error: "No updates provided" });
+
+    const doc = await Page.findByIdAndUpdate(req.params.id, { $set: updates }, { new: true });
+    if (!doc) return res.status(404).json({ error: "Not found" });
+
+    res.json({ nav: doc.nav || null, updatedAt: doc.updatedAt });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+// ✅ PATCH footer (autosave optional)
+app.patch("/api/pages/:id/footer", async (req, res) => {
+  try {
+    const updates = buildBlockUpdates("footer", req.body || {});
+    if (Object.keys(updates).length === 0) return res.status(400).json({ error: "No updates provided" });
+
+    const doc = await Page.findByIdAndUpdate(req.params.id, { $set: updates }, { new: true });
+    if (!doc) return res.status(404).json({ error: "Not found" });
+
+    res.json({ footer: doc.footer || null, updatedAt: doc.updatedAt });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
 // Create page
 app.post("/api/pages", async (req, res) => {
   try {
@@ -303,15 +351,19 @@ app.post("/api/pages", async (req, res) => {
 
     const sections = Array.isArray(req.body?.sections) ? req.body.sections : [];
 
+    const nav = req.body?.nav && typeof req.body.nav === "object" ? req.body.nav : null;
+    const footer = req.body?.footer && typeof req.body.footer === "object" ? req.body.footer : null;
+
     const doc = await Page.create({
       name,
       slug,
       sections,
+      nav,
+      footer,
     });
 
     res.status(201).json(toClientPage(doc));
   } catch (e) {
-    // duplicate slug
     if (e?.code === 11000) {
       return res.status(409).json({ error: "Slug already exists" });
     }
@@ -320,7 +372,7 @@ app.post("/api/pages", async (req, res) => {
   }
 });
 
-// Update page
+// Update page (full save)
 app.put("/api/pages/:id", async (req, res) => {
   try {
     const id = req.params.id;
@@ -332,10 +384,12 @@ app.put("/api/pages/:id", async (req, res) => {
     if (isReservedSlug(slug)) return res.status(400).json({ error: "Slug is reserved" });
 
     const sections = Array.isArray(req.body?.sections) ? req.body.sections : [];
+    const nav = req.body?.nav && typeof req.body.nav === "object" ? req.body.nav : null;
+    const footer = req.body?.footer && typeof req.body.footer === "object" ? req.body.footer : null;
 
     const updated = await Page.findByIdAndUpdate(
       id,
-      { name, slug, sections },
+      { name, slug, sections, nav, footer },
       { new: true, runValidators: true }
     );
 
@@ -352,16 +406,18 @@ app.put("/api/pages/:id", async (req, res) => {
 
 // Delete page
 app.delete("/api/pages/:id", async (req, res) => {
-  const deleted = await Page.findByIdAndDelete(req.params.id);
-  if (!deleted) return res.status(404).json({ error: "Not found" });
-  res.json({ ok: true });
+  try {
+    const deleted = await Page.findByIdAndDelete(req.params.id);
+    if (!deleted) return res.status(404).json({ error: "Not found" });
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(400).json({ error: "Invalid id" });
+  }
 });
 
 app.get("/api/health", (req, res) => res.json({ ok: true }));
 
 const PORT = Number(process.env.PORT) || 5000;
-
 app.listen(PORT, () => {
   console.log("API running on port", PORT);
 });
-
