@@ -103,7 +103,8 @@ const PageSchema = new mongoose.Schema(
     name: { type: String, required: true },
     slug: { type: String, required: true, unique: true, index: true },
     sections: { type: [SectionSchema], default: [] },
-
+    active: { type: Boolean, default: true },
+    visible: { type: Boolean, default: true },
     // ✅ NEW:
     nav: { type: BlockSchema, default: null },
     footer: { type: BlockSchema, default: null },
@@ -151,10 +152,12 @@ function toClientPage(doc) {
     slug: obj.slug,
     sections: obj.sections || [],
 
-    // ✅ include nav/footer so client can render real DB values
+    // include nav/footer so client can render real DB values
     nav: obj.nav || null,
     footer: obj.footer || null,
 
+    active: typeof obj.active === "boolean" ? obj.active : true,
+    visible: typeof obj.visible === "boolean" ? obj.visible : true,
     createdAt: obj.createdAt,
     updatedAt: obj.updatedAt,
   };
@@ -228,6 +231,8 @@ app.get("/api/pages", async (req, res) => {
       sections: p.sections || [],
       nav: p.nav || null,
       footer: p.footer || null,
+      active: typeof p.active === "boolean" ? p.active : true,
+      visible: typeof p.visible === "boolean" ? p.visible : true,
       createdAt: p.createdAt,
       updatedAt: p.updatedAt,
     }))
@@ -307,8 +312,31 @@ app.patch("/api/pages/:id/sections/:sectionId", async (req, res) => {
     res.status(500).json({ error: "Server error" });
   }
 });
+app.patch("/api/pages/:id/status", async (req, res) => {
+  try {
+    const updates = {};
+    if (typeof req.body.active !== "undefined") updates.active = !!req.body.active;
+    if (typeof req.body.visible !== "undefined") updates.visible = !!req.body.visible;
 
-// ✅ PATCH nav (autosave)
+    if (Object.keys(updates).length === 0) {
+      return res.status(400).json({ error: "No updates provided" });
+    }
+
+    const doc = await Page.findByIdAndUpdate(
+      req.params.id,
+      { $set: updates },
+      { new: true }
+    );
+
+    if (!doc) return res.status(404).json({ error: "Not found" });
+    res.json(toClientPage(doc));
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+//  PATCH nav (autosave)
 app.patch("/api/pages/:id/nav", async (req, res) => {
   try {
     const updates = buildBlockUpdates("nav", req.body || {});
@@ -324,7 +352,7 @@ app.patch("/api/pages/:id/nav", async (req, res) => {
   }
 });
 
-// ✅ PATCH footer (autosave optional)
+// PATCH footer (autosave optional)
 app.patch("/api/pages/:id/footer", async (req, res) => {
   try {
     const updates = buildBlockUpdates("footer", req.body || {});
@@ -353,13 +381,16 @@ app.post("/api/pages", async (req, res) => {
 
     const nav = req.body?.nav && typeof req.body.nav === "object" ? req.body.nav : null;
     const footer = req.body?.footer && typeof req.body.footer === "object" ? req.body.footer : null;
-
+    const active = typeof req.body?.active === "boolean" ? req.body.active : true;
+    const visible = typeof req.body?.visible === "boolean" ? req.body.visible : true;
     const doc = await Page.create({
       name,
       slug,
       sections,
       nav,
       footer,
+      active,
+      visible,
     });
 
     res.status(201).json(toClientPage(doc));
