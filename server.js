@@ -108,6 +108,9 @@ const PageSchema = new mongoose.Schema(
     // ✅ NEW:
     nav: { type: BlockSchema, default: null },
     footer: { type: BlockSchema, default: null },
+    whatsapp: { type: BlockSchema, default: null },
+
+
   },
   { timestamps: true, collection: "pages" }
 );
@@ -155,6 +158,7 @@ function toClientPage(doc) {
     // include nav/footer so client can render real DB values
     nav: obj.nav || null,
     footer: obj.footer || null,
+    whatsapp: obj.whatsapp || null,   // ✅ ADD THIS
 
     active: typeof obj.active === "boolean" ? obj.active : true,
     visible: typeof obj.visible === "boolean" ? obj.visible : true,
@@ -381,14 +385,17 @@ app.post("/api/pages", async (req, res) => {
 
     const nav = req.body?.nav && typeof req.body.nav === "object" ? req.body.nav : null;
     const footer = req.body?.footer && typeof req.body.footer === "object" ? req.body.footer : null;
+    const whatsapp = req.body?.whatsapp && typeof req.body.whatsapp === "object" ? req.body.whatsapp : null;
     const active = typeof req.body?.active === "boolean" ? req.body.active : true;
     const visible = typeof req.body?.visible === "boolean" ? req.body.visible : true;
+
     const doc = await Page.create({
       name,
       slug,
       sections,
       nav,
       footer,
+      whatsapp,
       active,
       visible,
     });
@@ -417,10 +424,13 @@ app.put("/api/pages/:id", async (req, res) => {
     const sections = Array.isArray(req.body?.sections) ? req.body.sections : [];
     const nav = req.body?.nav && typeof req.body.nav === "object" ? req.body.nav : null;
     const footer = req.body?.footer && typeof req.body.footer === "object" ? req.body.footer : null;
+    const whatsapp = req.body?.whatsapp && typeof req.body.whatsapp === "object"
+      ? req.body.whatsapp
+      : null;   // ✅ ADD THIS
 
     const updated = await Page.findByIdAndUpdate(
       id,
-      { name, slug, sections, nav, footer },
+      { name, slug, sections, nav, footer, whatsapp },   // ✅ ADD HERE
       { new: true, runValidators: true }
     );
 
