@@ -7,6 +7,8 @@ import path from "path";
 import multer from "multer";
 import sharp from "sharp";
 import { randomUUID } from "crypto";
+import bcrypt from "bcryptjs";
+import jwt from "jsonwebtoken";
 
 dotenv.config();
 
@@ -23,6 +25,21 @@ if (!fs.existsSync(UPLOADS_DIR)) fs.mkdirSync(UPLOADS_DIR, { recursive: true });
 
 // Serve uploaded files publicly
 app.use("/uploads", express.static(UPLOADS_DIR));
+
+const authMiddleware = (req, res, next) => {
+  const header = req.headers.authorization;
+  if (!header) return res.status(401).json({ error: "No token" });
+
+  const token = header.split(" ")[1];
+
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    req.user = decoded;
+    next();
+  } catch {
+    res.status(401).json({ error: "Invalid token" });
+  }
+};
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -116,6 +133,18 @@ const PageSchema = new mongoose.Schema(
 );
 
 const Page = mongoose.model("Page", PageSchema);
+
+const UserSchema = new mongoose.Schema(
+  {
+    email: { type: String, required: true, unique: true, index: true },
+    password: { type: String, required: true }, // hashed password
+    role: { type: String, enum: ["admin", "manager"], default: "manager" },
+    pageId: { type: mongoose.Schema.Types.ObjectId, ref: "Page" },
+  },
+  { timestamps: true, collection: "users" }
+);
+
+const User = mongoose.model("User", UserSchema);
 
 // -------------------- Helpers --------------------
 const RESERVED_SLUGS = new Set([
@@ -372,6 +401,78 @@ app.patch("/api/pages/:id/footer", async (req, res) => {
   }
 });
 
+// create user
+app.post("/api/login", async (req, res) => {
+  try {
+    const { email, password } = req.body;
+
+    if (!email || !password) {
+      return res.status(400).json({ error: "Email and password required" });
+    }
+
+    const user = await User.findOne({ email: email.toLowerCase() });
+    if (!user) {
+      return res.status(401).json({ error: "Invalid credentials" });
+    }
+
+    const match = await bcrypt.compare(password, user.password);
+    if (!match) {
+      return res.status(401).json({ error: "Invalid credentials" });
+    }
+
+    const token = jwt.sign(
+      {
+        id: user._id,
+        role: user.role,
+        pageId: user.pageId,
+      },
+      process.env.JWT_SECRET || "supersecret",
+      { expiresIn: "7d" }
+    );
+
+    res.json({ token });
+  } catch (err) {
+    console.error("LOGIN ERROR:", err);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+//add manager to page
+app.post("/api/pages/:pageId/users", async (req, res) => {
+  try {
+    const { email, password } = req.body;
+    const { pageId } = req.params;
+
+    if (!email || !password) {
+      return res.status(400).json({ error: "Email and password required" });
+    }
+
+    const existing = await User.findOne({ email: email.toLowerCase() });
+    if (existing) {
+      return res.status(409).json({ error: "Email already exists" });
+    }
+
+    const hashed = await bcrypt.hash(password, 10);
+
+    const user = await User.create({
+      email: email.toLowerCase(),
+      password: hashed,
+      role: "manager",
+      pageId,
+    });
+
+    res.status(201).json({
+      id: user._id,
+      email: user.email,
+      role: user.role,
+      pageId: user.pageId,
+    });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
 // Create page
 app.post("/api/pages", async (req, res) => {
   try {
@@ -443,6 +544,16 @@ app.put("/api/pages/:id", async (req, res) => {
     console.error(e);
     res.status(500).json({ error: "Server error" });
   }
+});
+
+app.put("/api/pages/:pageId", authMiddleware, async (req, res) => {
+  const { pageId } = req.params;
+
+  if (req.user.role === "manager" && req.user.pageId !== pageId) {
+    return res.status(403).json({ error: "Forbidden" });
+  }
+
+  // continue update
 });
 
 // Delete page
