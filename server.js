@@ -1,3 +1,4 @@
+// server.js
 import express from "express";
 import cors from "cors";
 import mongoose from "mongoose";
@@ -14,42 +15,49 @@ dotenv.config();
 
 const app = express();
 
-// Dev-friendly CORS (restrict later if you want)
 app.use(cors());
 app.use(express.json({ limit: "2mb" }));
 app.set("trust proxy", 1);
 
-// -------------------- Uploads --------------------
+// Uploads directory
 const UPLOADS_DIR = path.join(process.cwd(), "uploads");
 if (!fs.existsSync(UPLOADS_DIR)) fs.mkdirSync(UPLOADS_DIR, { recursive: true });
 
-// Serve uploaded files publicly
 app.use("/uploads", express.static(UPLOADS_DIR));
 
+// Auth middleware
 const authMiddleware = (req, res, next) => {
-  const header = req.headers.authorization;
-  if (!header) return res.status(401).json({ error: "No token" });
+  const authHeader = req.headers.authorization;
+  
+  if (!authHeader) {
+    return res.status(401).json({ error: "No token provided" });
+  }
 
-  const token = header.split(" ")[1];
+  const token = authHeader.split(" ")[1];
 
   try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    const decoded = jwt.verify(
+      token, 
+      process.env.JWT_SECRET || "your-secret-key"
+    );
     req.user = decoded;
     next();
-  } catch {
-    res.status(401).json({ error: "Invalid token" });
+  } catch (err) {
+    return res.status(401).json({ error: "Invalid token" });
   }
 };
 
+// Multer upload
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 5 * 1024 * 1024 }, // 5 MB
+  limits: { fileSize: 5 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
     const ok = file.mimetype && file.mimetype.startsWith("image/");
     cb(ok ? null : new Error("Only image files are allowed"), ok);
   },
 });
 
+// Upload endpoint
 app.post("/api/uploads/image", upload.single("file"), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: "No file uploaded" });
@@ -73,7 +81,7 @@ app.post("/api/uploads/image", upload.single("file"), async (req, res) => {
   }
 });
 
-// -------------------- Mongo --------------------
+// MongoDB connection
 if (!process.env.MONGODB_URI) {
   console.error("Missing MONGODB_URI in .env");
   process.exit(1);
@@ -82,16 +90,13 @@ if (!process.env.MONGODB_URI) {
 await mongoose.connect(process.env.MONGODB_URI);
 console.log("Mongo connected");
 
-// -------------------- Models --------------------
-
-// Language (your existing idea)
+// Models
 const LanguageSchema = new mongoose.Schema(
   { _id: String },
   { strict: false, collection: "language" }
 );
 const Language = mongoose.model("Language", LanguageSchema);
 
-// Pages
 const SectionSchema = new mongoose.Schema(
   {
     id: { type: String, required: true },
@@ -104,7 +109,6 @@ const SectionSchema = new mongoose.Schema(
   { _id: false }
 );
 
-// ✅ NEW: nav/footer reusable schema
 const BlockSchema = new mongoose.Schema(
   {
     enabled: { type: Boolean, default: true },
@@ -122,12 +126,9 @@ const PageSchema = new mongoose.Schema(
     sections: { type: [SectionSchema], default: [] },
     active: { type: Boolean, default: true },
     visible: { type: Boolean, default: true },
-    // ✅ NEW:
     nav: { type: BlockSchema, default: null },
     footer: { type: BlockSchema, default: null },
     whatsapp: { type: BlockSchema, default: null },
-
-
   },
   { timestamps: true, collection: "pages" }
 );
@@ -137,7 +138,7 @@ const Page = mongoose.model("Page", PageSchema);
 const UserSchema = new mongoose.Schema(
   {
     email: { type: String, required: true, unique: true, index: true },
-    password: { type: String, required: true }, // hashed password
+    password: { type: String, required: true },
     role: { type: String, enum: ["admin", "manager"], default: "manager" },
     pageId: { type: mongoose.Schema.Types.ObjectId, ref: "Page" },
   },
@@ -146,21 +147,10 @@ const UserSchema = new mongoose.Schema(
 
 const User = mongoose.model("User", UserSchema);
 
-// -------------------- Helpers --------------------
+// Helpers
 const RESERVED_SLUGS = new Set([
-  "",
-  "home",
-  "about",
-  "contact",
-  "booking",
-  "portfolio",
-  "sales",
-  "bio",
-  "modern",
-  "payment",
-  "admin",
-  "admin-preview",
-  "preview",
+  "", "home", "about", "contact", "booking", "portfolio", "sales", "bio", 
+  "modern", "payment", "admin", "admin-preview", "preview", "login", "logout"
 ]);
 
 function normalizeSlug(slug) {
@@ -183,12 +173,9 @@ function toClientPage(doc) {
     name: obj.name,
     slug: obj.slug,
     sections: obj.sections || [],
-
-    // include nav/footer so client can render real DB values
     nav: obj.nav || null,
     footer: obj.footer || null,
-    whatsapp: obj.whatsapp || null,   // ✅ ADD THIS
-
+    whatsapp: obj.whatsapp || null,
     active: typeof obj.active === "boolean" ? obj.active : true,
     visible: typeof obj.visible === "boolean" ? obj.visible : true,
     createdAt: obj.createdAt,
@@ -228,7 +215,7 @@ function buildBlockUpdates(prefix, body) {
   return updates;
 }
 
-// -------------------- Language Routes --------------------
+// Language Routes
 app.get("/api/seed-language", async (req, res) => {
   const doc = await Language.create({
     _id: "en",
@@ -251,9 +238,98 @@ app.get("/api/language/:lang", async (req, res) => {
   res.json(doc);
 });
 
-// -------------------- Pages Routes --------------------
+// Auth Routes
+app.post("/api/auth/login", async (req, res) => {
+  try {
+    const { email, password } = req.body;
 
-// List pages
+    if (!email || !password) {
+      return res.status(400).json({ error: "Email and password required" });
+    }
+
+    const user = await User.findOne({ email: email.toLowerCase() });
+    if (!user) {
+      return res.status(401).json({ error: "Invalid credentials" });
+    }
+
+    const match = await bcrypt.compare(password, user.password);
+    if (!match) {
+      return res.status(401).json({ error: "Invalid credentials" });
+    }
+
+    const token = jwt.sign(
+      {
+        id: user._id,
+        email: user.email,
+        role: user.role,
+        pageId: user.pageId,
+      },
+      process.env.JWT_SECRET || "your-secret-key",
+      { expiresIn: "7d" }
+    );
+
+    res.json({
+      token,
+      user: {
+        id: user._id,
+        email: user.email,
+        role: user.role,
+        pageId: user.pageId,
+      }
+    });
+  } catch (err) {
+    console.error("LOGIN ERROR:", err);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+app.get("/api/auth/me", authMiddleware, async (req, res) => {
+  try {
+    const user = await User.findById(req.user.id).select("-password");
+    if (!user) {
+      return res.status(404).json({ error: "User not found" });
+    }
+    res.json({ user });
+  } catch (err) {
+    console.error("GET USER ERROR:", err);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+// Setup admin (remove after first use)
+app.post("/api/setup-admin", async (req, res) => {
+  try {
+    const { email, password } = req.body;
+    
+    if (!email || !password) {
+      return res.status(400).json({ error: "Email and password required" });
+    }
+
+    const existingAdmin = await User.findOne({ role: "admin" });
+    if (existingAdmin) {
+      return res.status(400).json({ error: "Admin already exists" });
+    }
+
+    const hashed = await bcrypt.hash(password, 10);
+    
+    const admin = await User.create({
+      email: email.toLowerCase(),
+      password: hashed,
+      role: "admin"
+    });
+
+    res.status(201).json({
+      message: "Admin created successfully",
+      email: admin.email,
+      role: admin.role
+    });
+  } catch (err) {
+    console.error("SETUP ADMIN ERROR:", err);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+// Page Routes
 app.get("/api/pages", async (req, res) => {
   const pages = await Page.find().sort({ updatedAt: -1 }).lean();
   res.json(
@@ -264,6 +340,7 @@ app.get("/api/pages", async (req, res) => {
       sections: p.sections || [],
       nav: p.nav || null,
       footer: p.footer || null,
+      whatsapp: p.whatsapp || null,
       active: typeof p.active === "boolean" ? p.active : true,
       visible: typeof p.visible === "boolean" ? p.visible : true,
       createdAt: p.createdAt,
@@ -272,7 +349,6 @@ app.get("/api/pages", async (req, res) => {
   );
 });
 
-// Get page by id
 app.get("/api/pages/:id", async (req, res) => {
   try {
     const doc = await Page.findById(req.params.id);
@@ -283,7 +359,6 @@ app.get("/api/pages/:id", async (req, res) => {
   }
 });
 
-// Get page by slug
 app.get("/api/pages/slug/:slug", async (req, res) => {
   const slug = normalizeSlug(req.params.slug);
   const doc = await Page.findOne({ slug });
@@ -291,7 +366,6 @@ app.get("/api/pages/slug/:slug", async (req, res) => {
   res.json(toClientPage(doc));
 });
 
-// Update ONE section (partial OR replace) by sectionId
 app.patch("/api/pages/:id/sections/:sectionId", async (req, res) => {
   try {
     const { id, sectionId } = req.params;
@@ -345,6 +419,7 @@ app.patch("/api/pages/:id/sections/:sectionId", async (req, res) => {
     res.status(500).json({ error: "Server error" });
   }
 });
+
 app.patch("/api/pages/:id/status", async (req, res) => {
   try {
     const updates = {};
@@ -369,7 +444,6 @@ app.patch("/api/pages/:id/status", async (req, res) => {
   }
 });
 
-//  PATCH nav (autosave)
 app.patch("/api/pages/:id/nav", async (req, res) => {
   try {
     const updates = buildBlockUpdates("nav", req.body || {});
@@ -385,7 +459,6 @@ app.patch("/api/pages/:id/nav", async (req, res) => {
   }
 });
 
-// PATCH footer (autosave optional)
 app.patch("/api/pages/:id/footer", async (req, res) => {
   try {
     const updates = buildBlockUpdates("footer", req.body || {});
@@ -401,43 +474,7 @@ app.patch("/api/pages/:id/footer", async (req, res) => {
   }
 });
 
-// create user
-app.post("/api/login", async (req, res) => {
-  try {
-    const { email, password } = req.body;
-
-    if (!email || !password) {
-      return res.status(400).json({ error: "Email and password required" });
-    }
-
-    const user = await User.findOne({ email: email.toLowerCase() });
-    if (!user) {
-      return res.status(401).json({ error: "Invalid credentials" });
-    }
-
-    const match = await bcrypt.compare(password, user.password);
-    if (!match) {
-      return res.status(401).json({ error: "Invalid credentials" });
-    }
-
-    const token = jwt.sign(
-      {
-        id: user._id,
-        role: user.role,
-        pageId: user.pageId,
-      },
-      process.env.JWT_SECRET || "supersecret",
-      { expiresIn: "7d" }
-    );
-
-    res.json({ token });
-  } catch (err) {
-    console.error("LOGIN ERROR:", err);
-    res.status(500).json({ error: "Server error" });
-  }
-});
-
-//add manager to page
+// Create manager user for a page
 app.post("/api/pages/:pageId/users", async (req, res) => {
   try {
     const { email, password } = req.body;
@@ -445,6 +482,11 @@ app.post("/api/pages/:pageId/users", async (req, res) => {
 
     if (!email || !password) {
       return res.status(400).json({ error: "Email and password required" });
+    }
+
+    const page = await Page.findById(pageId);
+    if (!page) {
+      return res.status(404).json({ error: "Page not found" });
     }
 
     const existing = await User.findOne({ email: email.toLowerCase() });
@@ -466,9 +508,10 @@ app.post("/api/pages/:pageId/users", async (req, res) => {
       email: user.email,
       role: user.role,
       pageId: user.pageId,
+      message: "Manager created successfully"
     });
   } catch (e) {
-    console.error(e);
+    console.error("CREATE USER ERROR:", e);
     res.status(500).json({ error: "Server error" });
   }
 });
@@ -483,7 +526,6 @@ app.post("/api/pages", async (req, res) => {
     if (isReservedSlug(slug)) return res.status(400).json({ error: "Slug is reserved" });
 
     const sections = Array.isArray(req.body?.sections) ? req.body.sections : [];
-
     const nav = req.body?.nav && typeof req.body.nav === "object" ? req.body.nav : null;
     const footer = req.body?.footer && typeof req.body.footer === "object" ? req.body.footer : null;
     const whatsapp = req.body?.whatsapp && typeof req.body.whatsapp === "object" ? req.body.whatsapp : null;
@@ -511,7 +553,7 @@ app.post("/api/pages", async (req, res) => {
   }
 });
 
-// Update page (full save)
+// Update page
 app.put("/api/pages/:id", async (req, res) => {
   try {
     const id = req.params.id;
@@ -525,13 +567,11 @@ app.put("/api/pages/:id", async (req, res) => {
     const sections = Array.isArray(req.body?.sections) ? req.body.sections : [];
     const nav = req.body?.nav && typeof req.body.nav === "object" ? req.body.nav : null;
     const footer = req.body?.footer && typeof req.body.footer === "object" ? req.body.footer : null;
-    const whatsapp = req.body?.whatsapp && typeof req.body.whatsapp === "object"
-      ? req.body.whatsapp
-      : null;   // ✅ ADD THIS
+    const whatsapp = req.body?.whatsapp && typeof req.body.whatsapp === "object" ? req.body.whatsapp : null;
 
     const updated = await Page.findByIdAndUpdate(
       id,
-      { name, slug, sections, nav, footer, whatsapp },   // ✅ ADD HERE
+      { name, slug, sections, nav, footer, whatsapp },
       { new: true, runValidators: true }
     );
 
@@ -544,16 +584,6 @@ app.put("/api/pages/:id", async (req, res) => {
     console.error(e);
     res.status(500).json({ error: "Server error" });
   }
-});
-
-app.put("/api/pages/:pageId", authMiddleware, async (req, res) => {
-  const { pageId } = req.params;
-
-  if (req.user.role === "manager" && req.user.pageId !== pageId) {
-    return res.status(403).json({ error: "Forbidden" });
-  }
-
-  // continue update
 });
 
 // Delete page
