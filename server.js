@@ -28,7 +28,7 @@ app.use("/uploads", express.static(UPLOADS_DIR));
 // Auth middleware
 const authMiddleware = (req, res, next) => {
   const authHeader = req.headers.authorization;
-  
+
   if (!authHeader) {
     return res.status(401).json({ error: "No token provided" });
   }
@@ -36,10 +36,7 @@ const authMiddleware = (req, res, next) => {
   const token = authHeader.split(" ")[1];
 
   try {
-    const decoded = jwt.verify(
-      token, 
-      process.env.JWT_SECRET || "your-secret-key"
-    );
+    const decoded = jwt.verify(token, process.env.JWT_SECRET || "your-secret-key");
     req.user = decoded;
     next();
   } catch (err) {
@@ -91,10 +88,7 @@ await mongoose.connect(process.env.MONGODB_URI);
 console.log("Mongo connected");
 
 // Models
-const LanguageSchema = new mongoose.Schema(
-  { _id: String },
-  { strict: false, collection: "language" }
-);
+const LanguageSchema = new mongoose.Schema({ _id: String }, { strict: false, collection: "language" });
 const Language = mongoose.model("Language", LanguageSchema);
 
 const SectionSchema = new mongoose.Schema(
@@ -129,6 +123,10 @@ const PageSchema = new mongoose.Schema(
     nav: { type: BlockSchema, default: null },
     footer: { type: BlockSchema, default: null },
     whatsapp: { type: BlockSchema, default: null },
+
+    // ✅ NEW
+    general: { type: mongoose.Schema.Types.Mixed, default: {} },
+    limits: { type: mongoose.Schema.Types.Mixed, default: {} },
   },
   { timestamps: true, collection: "pages" }
 );
@@ -149,8 +147,21 @@ const User = mongoose.model("User", UserSchema);
 
 // Helpers
 const RESERVED_SLUGS = new Set([
-  "", "home", "about", "contact", "booking", "portfolio", "sales", "bio", 
-  "modern", "payment", "admin", "admin-preview", "preview", "login", "logout"
+  "",
+  "home",
+  "about",
+  "contact",
+  "booking",
+  "portfolio",
+  "sales",
+  "bio",
+  "modern",
+  "payment",
+  "admin",
+  "admin-preview",
+  "preview",
+  "login",
+  "logout",
 ]);
 
 function normalizeSlug(slug) {
@@ -163,6 +174,10 @@ function isReservedSlug(slug) {
   if (RESERVED_SLUGS.has(s)) return true;
   if (s.startsWith("admin")) return true;
   return false;
+}
+
+function isPlainObject(v) {
+  return !!v && typeof v === "object" && !Array.isArray(v);
 }
 
 function toClientPage(doc) {
@@ -180,11 +195,11 @@ function toClientPage(doc) {
     visible: typeof obj.visible === "boolean" ? obj.visible : true,
     createdAt: obj.createdAt,
     updatedAt: obj.updatedAt,
-  };
-}
 
-function isPlainObject(v) {
-  return !!v && typeof v === "object" && !Array.isArray(v);
+    // ✅ include
+    general: obj.general || {},
+    limits: obj.limits || {},
+  };
 }
 
 function buildBlockUpdates(prefix, body) {
@@ -219,12 +234,7 @@ function buildBlockUpdates(prefix, body) {
 app.get("/api/seed-language", async (req, res) => {
   const doc = await Language.create({
     _id: "en",
-    homepage: {
-      hero: {
-        title: "Create Beautiful Business Pages",
-        subtitle: "Fast and modern",
-      },
-    },
+    homepage: { hero: { title: "Create Beautiful Business Pages", subtitle: "Fast and modern" } },
   });
 
   res.json({ ok: true, created: doc._id });
@@ -243,39 +253,23 @@ app.post("/api/auth/login", async (req, res) => {
   try {
     const { email, password } = req.body;
 
-    if (!email || !password) {
-      return res.status(400).json({ error: "Email and password required" });
-    }
+    if (!email || !password) return res.status(400).json({ error: "Email and password required" });
 
     const user = await User.findOne({ email: email.toLowerCase() });
-    if (!user) {
-      return res.status(401).json({ error: "Invalid credentials" });
-    }
+    if (!user) return res.status(401).json({ error: "Invalid credentials" });
 
     const match = await bcrypt.compare(password, user.password);
-    if (!match) {
-      return res.status(401).json({ error: "Invalid credentials" });
-    }
+    if (!match) return res.status(401).json({ error: "Invalid credentials" });
 
     const token = jwt.sign(
-      {
-        id: user._id,
-        email: user.email,
-        role: user.role,
-        pageId: user.pageId,
-      },
+      { id: user._id, email: user.email, role: user.role, pageId: user.pageId },
       process.env.JWT_SECRET || "your-secret-key",
       { expiresIn: "7d" }
     );
 
     res.json({
       token,
-      user: {
-        id: user._id,
-        email: user.email,
-        role: user.role,
-        pageId: user.pageId,
-      }
+      user: { id: user._id, email: user.email, role: user.role, pageId: user.pageId },
     });
   } catch (err) {
     console.error("LOGIN ERROR:", err);
@@ -286,9 +280,7 @@ app.post("/api/auth/login", async (req, res) => {
 app.get("/api/auth/me", authMiddleware, async (req, res) => {
   try {
     const user = await User.findById(req.user.id).select("-password");
-    if (!user) {
-      return res.status(404).json({ error: "User not found" });
-    }
+    if (!user) return res.status(404).json({ error: "User not found" });
     res.json({ user });
   } catch (err) {
     console.error("GET USER ERROR:", err);
@@ -300,29 +292,21 @@ app.get("/api/auth/me", authMiddleware, async (req, res) => {
 app.post("/api/setup-admin", async (req, res) => {
   try {
     const { email, password } = req.body;
-    
-    if (!email || !password) {
-      return res.status(400).json({ error: "Email and password required" });
-    }
+
+    if (!email || !password) return res.status(400).json({ error: "Email and password required" });
 
     const existingAdmin = await User.findOne({ role: "admin" });
-    if (existingAdmin) {
-      return res.status(400).json({ error: "Admin already exists" });
-    }
+    if (existingAdmin) return res.status(400).json({ error: "Admin already exists" });
 
     const hashed = await bcrypt.hash(password, 10);
-    
+
     const admin = await User.create({
       email: email.toLowerCase(),
       password: hashed,
-      role: "admin"
+      role: "admin",
     });
 
-    res.status(201).json({
-      message: "Admin created successfully",
-      email: admin.email,
-      role: admin.role
-    });
+    res.status(201).json({ message: "Admin created successfully", email: admin.email, role: admin.role });
   } catch (err) {
     console.error("SETUP ADMIN ERROR:", err);
     res.status(500).json({ error: "Server error" });
@@ -345,6 +329,10 @@ app.get("/api/pages", async (req, res) => {
       visible: typeof p.visible === "boolean" ? p.visible : true,
       createdAt: p.createdAt,
       updatedAt: p.updatedAt,
+
+      // optional (safe to include)
+      general: p.general || {},
+      limits: p.limits || {},
     }))
   );
 });
@@ -372,12 +360,8 @@ app.patch("/api/pages/:id/sections/:sectionId", async (req, res) => {
 
     const updates = {};
 
-    if (typeof req.body.enabled !== "undefined") {
-      updates["sections.$.enabled"] = !!req.body.enabled;
-    }
-    if (typeof req.body.template !== "undefined") {
-      updates["sections.$.template"] = String(req.body.template);
-    }
+    if (typeof req.body.enabled !== "undefined") updates["sections.$.enabled"] = !!req.body.enabled;
+    if (typeof req.body.template !== "undefined") updates["sections.$.template"] = String(req.body.template);
 
     const replaceConfig = req.body.replaceConfig === true;
     const replaceStyle = req.body.replaceStyle === true;
@@ -400,15 +384,9 @@ app.patch("/api/pages/:id/sections/:sectionId", async (req, res) => {
       }
     }
 
-    if (Object.keys(updates).length === 0) {
-      return res.status(400).json({ error: "No updates provided" });
-    }
+    if (Object.keys(updates).length === 0) return res.status(400).json({ error: "No updates provided" });
 
-    const doc = await Page.findOneAndUpdate(
-      { _id: id, "sections.id": sectionId },
-      { $set: updates },
-      { new: true, runValidators: true }
-    );
+    const doc = await Page.findOneAndUpdate({ _id: id, "sections.id": sectionId }, { $set: updates }, { new: true });
 
     if (!doc) return res.status(404).json({ error: "Not found" });
 
@@ -426,17 +404,11 @@ app.patch("/api/pages/:id/status", async (req, res) => {
     if (typeof req.body.active !== "undefined") updates.active = !!req.body.active;
     if (typeof req.body.visible !== "undefined") updates.visible = !!req.body.visible;
 
-    if (Object.keys(updates).length === 0) {
-      return res.status(400).json({ error: "No updates provided" });
-    }
+    if (Object.keys(updates).length === 0) return res.status(400).json({ error: "No updates provided" });
 
-    const doc = await Page.findByIdAndUpdate(
-      req.params.id,
-      { $set: updates },
-      { new: true }
-    );
-
+    const doc = await Page.findByIdAndUpdate(req.params.id, { $set: updates }, { new: true });
     if (!doc) return res.status(404).json({ error: "Not found" });
+
     res.json(toClientPage(doc));
   } catch (e) {
     console.error(e);
@@ -480,19 +452,13 @@ app.post("/api/pages/:pageId/users", async (req, res) => {
     const { email, password } = req.body;
     const { pageId } = req.params;
 
-    if (!email || !password) {
-      return res.status(400).json({ error: "Email and password required" });
-    }
+    if (!email || !password) return res.status(400).json({ error: "Email and password required" });
 
     const page = await Page.findById(pageId);
-    if (!page) {
-      return res.status(404).json({ error: "Page not found" });
-    }
+    if (!page) return res.status(404).json({ error: "Page not found" });
 
     const existing = await User.findOne({ email: email.toLowerCase() });
-    if (existing) {
-      return res.status(409).json({ error: "Email already exists" });
-    }
+    if (existing) return res.status(409).json({ error: "Email already exists" });
 
     const hashed = await bcrypt.hash(password, 10);
 
@@ -508,7 +474,7 @@ app.post("/api/pages/:pageId/users", async (req, res) => {
       email: user.email,
       role: user.role,
       pageId: user.pageId,
-      message: "Manager created successfully"
+      message: "Manager created successfully",
     });
   } catch (e) {
     console.error("CREATE USER ERROR:", e);
@@ -516,7 +482,51 @@ app.post("/api/pages/:pageId/users", async (req, res) => {
   }
 });
 
-// Create page
+// List managers for a page
+app.get("/api/pages/:pageId/users", async (req, res) => {
+  try {
+    const { pageId } = req.params;
+
+    const page = await Page.findById(pageId).lean();
+    if (!page) return res.status(404).json({ error: "Page not found" });
+
+    const users = await User.find({ pageId, role: "manager" })
+      .select("_id email role pageId createdAt updatedAt")
+      .lean();
+
+    res.json(
+      users.map((u) => ({
+        id: String(u._id),
+        email: u.email,
+        role: u.role,
+        pageId: String(u.pageId),
+        createdAt: u.createdAt,
+        updatedAt: u.updatedAt,
+      }))
+    );
+  } catch (e) {
+    console.error("LIST USERS ERROR:", e);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+// Delete a manager
+app.delete("/api/pages/:pageId/users/:userId", async (req, res) => {
+  try {
+    const { pageId, userId } = req.params;
+
+    const user = await User.findOne({ _id: userId, pageId, role: "manager" });
+    if (!user) return res.status(404).json({ error: "Manager not found" });
+
+    await User.deleteOne({ _id: userId });
+    res.json({ ok: true });
+  } catch (e) {
+    console.error("DELETE USER ERROR:", e);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+// ✅ Create page (ONLY ONCE) - stores general + limits
 app.post("/api/pages", async (req, res) => {
   try {
     const name = String(req.body?.name || "").trim() || "Untitled";
@@ -532,6 +542,9 @@ app.post("/api/pages", async (req, res) => {
     const active = typeof req.body?.active === "boolean" ? req.body.active : true;
     const visible = typeof req.body?.visible === "boolean" ? req.body.visible : true;
 
+    const general = isPlainObject(req.body?.general) ? req.body.general : {};
+    const limits = isPlainObject(req.body?.limits) ? req.body.limits : {};
+
     const doc = await Page.create({
       name,
       slug,
@@ -541,19 +554,19 @@ app.post("/api/pages", async (req, res) => {
       whatsapp,
       active,
       visible,
+      general,
+      limits,
     });
 
     res.status(201).json(toClientPage(doc));
   } catch (e) {
-    if (e?.code === 11000) {
-      return res.status(409).json({ error: "Slug already exists" });
-    }
+    if (e?.code === 11000) return res.status(409).json({ error: "Slug already exists" });
     console.error(e);
     res.status(500).json({ error: "Server error" });
   }
 });
 
-// Update page
+// ✅ Update page - uses updateDoc so general + limits can be saved
 app.put("/api/pages/:id", async (req, res) => {
   try {
     const id = req.params.id;
@@ -569,18 +582,24 @@ app.put("/api/pages/:id", async (req, res) => {
     const footer = req.body?.footer && typeof req.body.footer === "object" ? req.body.footer : null;
     const whatsapp = req.body?.whatsapp && typeof req.body.whatsapp === "object" ? req.body.whatsapp : null;
 
-    const updated = await Page.findByIdAndUpdate(
-      id,
-      { name, slug, sections, nav, footer, whatsapp },
-      { new: true, runValidators: true }
-    );
+    const updateDoc = { name, slug, sections, nav, footer, whatsapp };
+
+    if (typeof req.body?.general !== "undefined") {
+      updateDoc.general = isPlainObject(req.body.general) ? req.body.general : {};
+    }
+    if (typeof req.body?.limits !== "undefined") {
+      updateDoc.limits = isPlainObject(req.body.limits) ? req.body.limits : {};
+    }
+
+    const updated = await Page.findByIdAndUpdate(id, updateDoc, {
+      new: true,
+      runValidators: true,
+    });
 
     if (!updated) return res.status(404).json({ error: "Not found" });
     res.json(toClientPage(updated));
   } catch (e) {
-    if (e?.code === 11000) {
-      return res.status(409).json({ error: "Slug already exists" });
-    }
+    if (e?.code === 11000) return res.status(409).json({ error: "Slug already exists" });
     console.error(e);
     res.status(500).json({ error: "Server error" });
   }
