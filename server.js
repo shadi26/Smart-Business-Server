@@ -10,6 +10,7 @@ import sharp from "sharp";
 import { randomUUID } from "crypto";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
+import languageRoutes from "./routes/language.js";
 
 dotenv.config();
 
@@ -23,6 +24,7 @@ app.set("trust proxy", 1);
 const UPLOADS_DIR = path.join(process.cwd(), "uploads");
 if (!fs.existsSync(UPLOADS_DIR)) fs.mkdirSync(UPLOADS_DIR, { recursive: true });
 app.use("/uploads", express.static(UPLOADS_DIR));
+app.use("/api/language", languageRoutes);
 
 // ---------------- Auth middleware ----------------
 const authMiddleware = (req, res, next) => {
@@ -124,9 +126,8 @@ if (!process.env.MONGODB_URI) {
 await mongoose.connect(process.env.MONGODB_URI);
 console.log("Mongo connected");
 
-// ---------------- Models ----------------
-const LanguageSchema = new mongoose.Schema({ _id: String }, { strict: false, collection: "language" });
-const Language = mongoose.model("Language", LanguageSchema);
+
+
 
 const SectionSchema = new mongoose.Schema(
   {
@@ -271,13 +272,7 @@ app.get("/api/seed-language", async (req, res) => {
   res.json({ ok: true, created: doc._id });
 });
 
-app.get("/api/language/:lang", async (req, res) => {
-  const lang = req.params.lang;
-  const doc = await Language.findById(lang).lean();
-  if (!doc) return res.status(404).json({ error: "Not found" });
-  delete doc.__v;
-  res.json(doc);
-});
+
 
 // ---------------- Auth routes ----------------
 app.post("/api/auth/login", async (req, res) => {
@@ -555,6 +550,8 @@ app.get(
     }
   }
 );
+
+
 
 // Delete manager (admin only)
 app.delete(
