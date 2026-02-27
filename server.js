@@ -87,7 +87,34 @@ const upload = multer({
     cb(ok ? null : new Error("Only image files are allowed"), ok);
   },
 });
+const clampInt = (v, min, max) => {
+  const n = Number.parseInt(String(v ?? ""), 10);
+  if (!Number.isFinite(n)) return null;
+  return Math.max(min, Math.min(max, n));
+};
 
+const clampFloat = (v, min, max) => {
+  const n = Number.parseFloat(String(v ?? ""));
+  if (!Number.isFinite(n)) return null;
+  return Math.max(min, Math.min(max, n));
+};
+
+const UPLOAD_PRESETS = {
+  // hero / carousel / big banners
+  hero: { maxWidth: 2560, quality: 86, effort: 4 },
+
+  // gallery images (projects)
+  gallery: { maxWidth: 2200, quality: 84, effort: 4 },
+
+  // category cards
+  category: { maxWidth: 1600, quality: 84, effort: 4 },
+
+  // logos and icons: keep edges crisp (lossless webp)
+  logo: { maxWidth: 1024, lossless: true, effort: 4 },
+
+  // fallback
+  default: { maxWidth: 2000, quality: 82, effort: 4 },
+};
 // Upload endpoint (admin + manager allowed)
 app.post(
   "/api/uploads/image",
@@ -98,19 +125,42 @@ app.post(
     try {
       if (!req.file) return res.status(400).json({ error: "No file uploaded" });
 
+      // FormData fields
+      const kindRaw = String(req.body?.kind || "default").toLowerCase().trim();
+      const preset = UPLOAD_PRESETS[kindRaw] || UPLOAD_PRESETS.default;
+
+      // Optional overrides (still clamped for safety)
+      const maxWidth = clampInt(req.body?.maxWidth, 320, 4096) ?? preset.maxWidth;
+      const quality = clampInt(req.body?.quality, 40, 95) ?? preset.quality ?? 82;
+      const effort = clampInt(req.body?.effort, 0, 6) ?? preset.effort ?? 4;
+
       const filename = `${randomUUID()}.webp`;
       const outPath = path.join(UPLOADS_DIR, filename);
 
-      await sharp(req.file.buffer)
+      // Convert once on server (authoritative)
+      const pipeline = sharp(req.file.buffer, { failOn: "none" })
         .rotate()
-        .resize({ width: 2000, withoutEnlargement: true })
-        .webp({ quality: 82 })
-        .toFile(outPath);
+        .resize({
+          width: maxWidth,
+          withoutEnlargement: true,
+          fit: "inside",
+        });
+
+      const info = preset.lossless
+        ? await pipeline.webp({ lossless: true, effort }).toFile(outPath)
+        : await pipeline.webp({ quality, effort, smartSubsample: true }).toFile(outPath);
 
       const baseUrl = `${req.protocol}://${req.get("host")}`;
       const url = `${baseUrl}/uploads/${filename}`;
 
-      res.json({ url, filename });
+      res.json({
+        url,
+        filename,
+        kind: kindRaw,
+        width: info?.width,
+        height: info?.height,
+        bytes: info?.size,
+      });
     } catch (e) {
       console.error(e);
       res.status(500).json({ error: "Upload failed" });
