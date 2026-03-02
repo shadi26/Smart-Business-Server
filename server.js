@@ -285,7 +285,7 @@ function buildBlockUpdates(prefix, body) {
 
 // ---------------- Auth routes ----------------
 
-// ✅ FIXED: manager login must include slug, and it must match the manager page slug
+// manager login must include slug, and it must match the manager page slug
 app.post("/api/auth/login", async (req, res) => {
   try {
     const email = String(req.body?.email || "").toLowerCase().trim();
@@ -302,28 +302,25 @@ app.post("/api/auth/login", async (req, res) => {
     const match = await bcrypt.compare(password, user.password);
     if (!match) return res.status(401).json({ error: "Invalid credentials" });
 
-    // ✅ HARD RULE: managers MUST login from a business page slug and it MUST match their page.
+    // Managers MUST login from a business page slug and it MUST match their page (generic errors)
     if (user.role === "manager") {
       if (!requestedSlug) {
-        return res.status(400).json({
-          error: "Manager login must be done from the business page (missing slug).",
-        });
+        return res.status(400).json({ error: "Login failed" });
       }
 
       if (!user.pageId) {
-        return res.status(403).json({ error: "This manager account is not assigned to a page." });
+        return res.status(403).json({ error: "Login failed" });
       }
 
       const page = await Page.findById(user.pageId).select("slug").lean();
       if (!page) {
-        return res.status(403).json({ error: "This manager page does not exist." });
+        return res.status(403).json({ error: "Login failed" });
       }
 
       const realSlug = normalizeSlug(page.slug);
       if (realSlug !== requestedSlug) {
-        return res.status(403).json({
-          error: `This manager account belongs to /${page.slug}, not /${requestedSlug}.`,
-        });
+        // ✅ IMPORTANT: do NOT reveal which page this manager belongs to
+        return res.status(403).json({ error: "Login failed" });
       }
     }
 
@@ -352,7 +349,6 @@ app.post("/api/auth/login", async (req, res) => {
     res.status(500).json({ error: "Server error" });
   }
 });
-
 app.get("/api/auth/me", requireAuth, async (req, res) => {
   try {
     const user = await User.findById(req.user.id).select("-password");
