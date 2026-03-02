@@ -434,9 +434,43 @@ app.post("/api/setup-admin", async (req, res) => {
 // ---------------- Pages routes ----------------
 
 // Admin list pages only
+//  Admin list pages (admin only) - needed for AdminDashboard/AdminPageEditor
 app.get("/api/pages", requireAuth, requireRole("admin"), async (req, res) => {
-  const pages = await Page.find().sort({ updatedAt: -1 }).lean();
-  res.json(pages.map((p) => toClientPage(p)));
+  try {
+    const pages = await Page.find().sort({ updatedAt: -1 }).lean();
+    res.json(pages.map((p) => toClientPage(p)));
+  } catch (e) {
+    console.error("ADMIN LIST PAGES ERROR:", e);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+//  Public list pages for homepage (only active + visible)
+
+app.get("/api/pages-public", async (req, res) => {
+  try {
+    const pages = await Page.find({
+      active: { $ne: false },
+      visible: { $ne: false },
+    })
+      .select("_id name slug active visible createdAt updatedAt")
+      .sort({ updatedAt: -1 })
+      .lean();
+
+    res.json(
+      (pages || []).map((p) => ({
+        id: String(p._id),
+        name: p.name,
+        slug: p.slug,
+        active: typeof p.active === "boolean" ? p.active : true,
+        visible: typeof p.visible === "boolean" ? p.visible : true,
+        createdAt: p.createdAt,
+        updatedAt: p.updatedAt,
+      }))
+    );
+  } catch (e) {
+    console.error("PUBLIC PAGES LIST ERROR:", e);
+    res.status(500).json({ error: "Server error" });
+  }
 });
 
 // Protected get by id (admin any, manager only own)
