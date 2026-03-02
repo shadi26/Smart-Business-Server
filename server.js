@@ -177,7 +177,35 @@ await mongoose.connect(process.env.MONGODB_URI);
 console.log("Mongo connected");
 
 
+// Change manager password (admin only)
+app.patch(
+  "/api/pages/:pageId/users/:userId/password",
+  requireAuth,
+  requireRole("admin"),
+  async (req, res) => {
+    try {
+      const { pageId, userId } = req.params;
+      const password = String(req.body?.password || "");
 
+      // basic validation (adjust rules if you want)
+      if (!password || password.length < 6) {
+        return res.status(400).json({ error: "Password must be at least 6 characters" });
+      }
+
+      const user = await User.findOne({ _id: userId, pageId, role: "manager" });
+      if (!user) return res.status(404).json({ error: "Manager not found" });
+
+      const hashed = await bcrypt.hash(password, 10);
+      user.password = hashed;
+      await user.save();
+
+      res.json({ ok: true, message: "Password updated" });
+    } catch (e) {
+      console.error("CHANGE MANAGER PASSWORD ERROR:", e);
+      res.status(500).json({ error: "Server error" });
+    }
+  }
+);
 
 const SectionSchema = new mongoose.Schema(
   {
