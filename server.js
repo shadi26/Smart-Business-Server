@@ -66,18 +66,6 @@ const requirePageAccessByIdParam = (paramName = "id") => (req, res, next) => {
   next();
 };
 
-const requirePageAccessByPageIdParam = (paramName = "pageId") => (req, res, next) => {
-  if (req.user?.role === "admin") return next();
-
-  const requestedId = String(req.params?.[paramName] || "");
-  const myPageId = String(req.user?.pageId || "");
-
-  if (!requestedId || !myPageId) return res.status(403).json({ error: "Forbidden" });
-  if (requestedId !== myPageId) return res.status(403).json({ error: "Forbidden" });
-
-  next();
-};
-
 // ---------------- Multer upload ----------------
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -87,34 +75,21 @@ const upload = multer({
     cb(ok ? null : new Error("Only image files are allowed"), ok);
   },
 });
+
 const clampInt = (v, min, max) => {
   const n = Number.parseInt(String(v ?? ""), 10);
   if (!Number.isFinite(n)) return null;
   return Math.max(min, Math.min(max, n));
 };
 
-const clampFloat = (v, min, max) => {
-  const n = Number.parseFloat(String(v ?? ""));
-  if (!Number.isFinite(n)) return null;
-  return Math.max(min, Math.min(max, n));
-};
-
 const UPLOAD_PRESETS = {
-  // hero / carousel / big banners
   hero: { maxWidth: 2560, quality: 86, effort: 4 },
-
-  // gallery images (projects)
   gallery: { maxWidth: 2200, quality: 84, effort: 4 },
-
-  // category cards
   category: { maxWidth: 1600, quality: 84, effort: 4 },
-
-  // logos and icons: keep edges crisp (lossless webp)
   logo: { maxWidth: 1024, lossless: true, effort: 4 },
-
-  // fallback
   default: { maxWidth: 2000, quality: 82, effort: 4 },
 };
+
 // Upload endpoint (admin + manager allowed)
 app.post(
   "/api/uploads/image",
@@ -125,11 +100,9 @@ app.post(
     try {
       if (!req.file) return res.status(400).json({ error: "No file uploaded" });
 
-      // FormData fields
       const kindRaw = String(req.body?.kind || "default").toLowerCase().trim();
       const preset = UPLOAD_PRESETS[kindRaw] || UPLOAD_PRESETS.default;
 
-      // Optional overrides (still clamped for safety)
       const maxWidth = clampInt(req.body?.maxWidth, 320, 4096) ?? preset.maxWidth;
       const quality = clampInt(req.body?.quality, 40, 95) ?? preset.quality ?? 82;
       const effort = clampInt(req.body?.effort, 0, 6) ?? preset.effort ?? 4;
@@ -137,7 +110,6 @@ app.post(
       const filename = `${randomUUID()}.webp`;
       const outPath = path.join(UPLOADS_DIR, filename);
 
-      // Convert once on server (authoritative)
       const pipeline = sharp(req.file.buffer, { failOn: "none" })
         .rotate()
         .resize({
@@ -176,37 +148,7 @@ if (!process.env.MONGODB_URI) {
 await mongoose.connect(process.env.MONGODB_URI);
 console.log("Mongo connected");
 
-
-// Change manager password (admin only)
-app.patch(
-  "/api/pages/:pageId/users/:userId/password",
-  requireAuth,
-  requireRole("admin"),
-  async (req, res) => {
-    try {
-      const { pageId, userId } = req.params;
-      const password = String(req.body?.password || "");
-
-      // basic validation (adjust rules if you want)
-      if (!password || password.length < 6) {
-        return res.status(400).json({ error: "Password must be at least 6 characters" });
-      }
-
-      const user = await User.findOne({ _id: userId, pageId, role: "manager" });
-      if (!user) return res.status(404).json({ error: "Manager not found" });
-
-      const hashed = await bcrypt.hash(password, 10);
-      user.password = hashed;
-      await user.save();
-
-      res.json({ ok: true, message: "Password updated" });
-    } catch (e) {
-      console.error("CHANGE MANAGER PASSWORD ERROR:", e);
-      res.status(500).json({ error: "Server error" });
-    }
-  }
-);
-
+// ---------------- Schemas ----------------
 const SectionSchema = new mongoose.Schema(
   {
     id: { type: String, required: true },
@@ -341,28 +283,49 @@ function buildBlockUpdates(prefix, body) {
   return updates;
 }
 
-// ---------------- Language routes (public) ----------------
-app.get("/api/seed-language", async (req, res) => {
-  const doc = await Language.create({
-    _id: "en",
-    homepage: { hero: { title: "Create Beautiful Business Pages", subtitle: "Fast and modern" } },
-  });
-  res.json({ ok: true, created: doc._id });
-});
-
-
-
 // ---------------- Auth routes ----------------
+
+// ✅ FIXED: manager login must include slug, and it must match the manager page slug
 app.post("/api/auth/login", async (req, res) => {
   try {
-    const { email, password } = req.body;
-    if (!email || !password) return res.status(400).json({ error: "Email and password required" });
+    const email = String(req.body?.email || "").toLowerCase().trim();
+    const password = String(req.body?.password || "");
+    const requestedSlug = normalizeSlug(req.body?.slug || req.body?.pageSlug || "");
 
-    const user = await User.findOne({ email: String(email).toLowerCase() });
+    if (!email || !password) {
+      return res.status(400).json({ error: "Email and password required" });
+    }
+
+    const user = await User.findOne({ email });
     if (!user) return res.status(401).json({ error: "Invalid credentials" });
 
     const match = await bcrypt.compare(password, user.password);
     if (!match) return res.status(401).json({ error: "Invalid credentials" });
+
+    // ✅ HARD RULE: managers MUST login from a business page slug and it MUST match their page.
+    if (user.role === "manager") {
+      if (!requestedSlug) {
+        return res.status(400).json({
+          error: "Manager login must be done from the business page (missing slug).",
+        });
+      }
+
+      if (!user.pageId) {
+        return res.status(403).json({ error: "This manager account is not assigned to a page." });
+      }
+
+      const page = await Page.findById(user.pageId).select("slug").lean();
+      if (!page) {
+        return res.status(403).json({ error: "This manager page does not exist." });
+      }
+
+      const realSlug = normalizeSlug(page.slug);
+      if (realSlug !== requestedSlug) {
+        return res.status(403).json({
+          error: `This manager account belongs to /${page.slug}, not /${requestedSlug}.`,
+        });
+      }
+    }
 
     const token = jwt.sign(
       {
@@ -433,8 +396,7 @@ app.post("/api/setup-admin", async (req, res) => {
 
 // ---------------- Pages routes ----------------
 
-// Admin list pages only
-//  Admin list pages (admin only) - needed for AdminDashboard/AdminPageEditor
+// Admin list pages (admin only)
 app.get("/api/pages", requireAuth, requireRole("admin"), async (req, res) => {
   try {
     const pages = await Page.find().sort({ updatedAt: -1 }).lean();
@@ -444,8 +406,8 @@ app.get("/api/pages", requireAuth, requireRole("admin"), async (req, res) => {
     res.status(500).json({ error: "Server error" });
   }
 });
-//  Public list pages for homepage (only active + visible)
 
+// Public list pages for homepage (only active + visible)
 app.get("/api/pages-public", async (req, res) => {
   try {
     const pages = await Page.find({
@@ -590,101 +552,108 @@ app.patch("/api/pages/:id/footer", requireAuth, requirePageAccessByIdParam("id")
 });
 
 // Create manager user for a page (admin only)
-app.post(
-  "/api/pages/:pageId/users",
-  requireAuth,
-  requireRole("admin"),
-  async (req, res) => {
-    try {
-      const { email, password } = req.body;
-      const { pageId } = req.params;
+app.post("/api/pages/:pageId/users", requireAuth, requireRole("admin"), async (req, res) => {
+  try {
+    const { email, password } = req.body;
+    const { pageId } = req.params;
 
-      if (!email || !password) return res.status(400).json({ error: "Email and password required" });
+    if (!email || !password) return res.status(400).json({ error: "Email and password required" });
 
-      const page = await Page.findById(pageId);
-      if (!page) return res.status(404).json({ error: "Page not found" });
+    const page = await Page.findById(pageId);
+    if (!page) return res.status(404).json({ error: "Page not found" });
 
-      const existing = await User.findOne({ email: String(email).toLowerCase() });
-      if (existing) return res.status(409).json({ error: "Email already exists" });
+    const existing = await User.findOne({ email: String(email).toLowerCase() });
+    if (existing) return res.status(409).json({ error: "Email already exists" });
 
-      const hashed = await bcrypt.hash(password, 10);
+    const hashed = await bcrypt.hash(password, 10);
 
-      const user = await User.create({
-        email: String(email).toLowerCase(),
-        password: hashed,
-        role: "manager",
-        pageId,
-      });
+    const user = await User.create({
+      email: String(email).toLowerCase(),
+      password: hashed,
+      role: "manager",
+      pageId,
+    });
 
-      res.status(201).json({
-        id: String(user._id),
-        email: user.email,
-        role: user.role,
-        pageId: String(user.pageId),
-        message: "Manager created successfully",
-      });
-    } catch (e) {
-      console.error("CREATE USER ERROR:", e);
-      res.status(500).json({ error: "Server error" });
-    }
+    res.status(201).json({
+      id: String(user._id),
+      email: user.email,
+      role: user.role,
+      pageId: String(user.pageId),
+      message: "Manager created successfully",
+    });
+  } catch (e) {
+    console.error("CREATE USER ERROR:", e);
+    res.status(500).json({ error: "Server error" });
   }
-);
+});
 
 // List managers (admin only)
-app.get(
-  "/api/pages/:pageId/users",
-  requireAuth,
-  requireRole("admin"),
-  async (req, res) => {
-    try {
-      const { pageId } = req.params;
+app.get("/api/pages/:pageId/users", requireAuth, requireRole("admin"), async (req, res) => {
+  try {
+    const { pageId } = req.params;
 
-      const page = await Page.findById(pageId).lean();
-      if (!page) return res.status(404).json({ error: "Page not found" });
+    const page = await Page.findById(pageId).lean();
+    if (!page) return res.status(404).json({ error: "Page not found" });
 
-      const users = await User.find({ pageId, role: "manager" })
-        .select("_id email role pageId createdAt updatedAt")
-        .lean();
+    const users = await User.find({ pageId, role: "manager" })
+      .select("_id email role pageId createdAt updatedAt")
+      .lean();
 
-      res.json(
-        users.map((u) => ({
-          id: String(u._id),
-          email: u.email,
-          role: u.role,
-          pageId: String(u.pageId),
-          createdAt: u.createdAt,
-          updatedAt: u.updatedAt,
-        }))
-      );
-    } catch (e) {
-      console.error("LIST USERS ERROR:", e);
-      res.status(500).json({ error: "Server error" });
-    }
+    res.json(
+      users.map((u) => ({
+        id: String(u._id),
+        email: u.email,
+        role: u.role,
+        pageId: String(u.pageId),
+        createdAt: u.createdAt,
+        updatedAt: u.updatedAt,
+      }))
+    );
+  } catch (e) {
+    console.error("LIST USERS ERROR:", e);
+    res.status(500).json({ error: "Server error" });
   }
-);
+});
 
+// Change manager password (admin only)
+app.patch("/api/pages/:pageId/users/:userId/password", requireAuth, requireRole("admin"), async (req, res) => {
+  try {
+    const { pageId, userId } = req.params;
+    const password = String(req.body?.password || "");
 
+    if (!password || password.length < 6) {
+      return res.status(400).json({ error: "Password must be at least 6 characters" });
+    }
+
+    const user = await User.findOne({ _id: userId, pageId, role: "manager" });
+    if (!user) return res.status(404).json({ error: "Manager not found" });
+
+    const hashed = await bcrypt.hash(password, 10);
+    user.password = hashed;
+    await user.save();
+
+    res.json({ ok: true, message: "Password updated" });
+  } catch (e) {
+    console.error("CHANGE MANAGER PASSWORD ERROR:", e);
+    res.status(500).json({ error: "Server error" });
+  }
+});
 
 // Delete manager (admin only)
-app.delete(
-  "/api/pages/:pageId/users/:userId",
-  requireAuth,
-  requireRole("admin"),
-  async (req, res) => {
-    try {
-      const { pageId, userId } = req.params;
+app.delete("/api/pages/:pageId/users/:userId", requireAuth, requireRole("admin"), async (req, res) => {
+  try {
+    const { pageId, userId } = req.params;
 
-      const user = await User.findOne({ _id: userId, pageId, role: "manager" });
-      if (!user) return res.status(404).json({ error: "Manager not found" });
+    const user = await User.findOne({ _id: userId, pageId, role: "manager" });
+    if (!user) return res.status(404).json({ error: "Manager not found" });
 
-      await User.deleteOne({ _id: userId });
-      res.json({ ok: true });
-    } catch (e) {
-      console.error("DELETE USER ERROR:", e);
-      res.status(500).json({ error: "Server error" });
-    }
+    await User.deleteOne({ _id: userId });
+    res.json({ ok: true });
+  } catch (e) {
+    console.error("DELETE USER ERROR:", e);
+    res.status(500).json({ error: "Server error" });
   }
-);
+});
 
 // Create page (admin only)
 app.post("/api/pages", requireAuth, requireRole("admin"), async (req, res) => {
@@ -729,63 +698,57 @@ app.post("/api/pages", requireAuth, requireRole("admin"), async (req, res) => {
 // Update page
 // Admin can update everything.
 // Manager can update ONLY: sections, nav, footer, whatsapp, general (no slug, no limits, no active/visible)
-app.put(
-  "/api/pages/:id",
-  requireAuth,
-  requirePageAccessByIdParam("id"),
-  async (req, res) => {
-    try {
-      const id = req.params.id;
+app.put("/api/pages/:id", requireAuth, requirePageAccessByIdParam("id"), async (req, res) => {
+  try {
+    const id = req.params.id;
 
-      const isAdmin = req.user?.role === "admin";
-      const updateDoc = {};
+    const isAdmin = req.user?.role === "admin";
+    const updateDoc = {};
 
-      if (isAdmin) {
-        const name = String(req.body?.name || "").trim() || "Untitled";
-        const slug = normalizeSlug(req.body?.slug);
+    if (isAdmin) {
+      const name = String(req.body?.name || "").trim() || "Untitled";
+      const slug = normalizeSlug(req.body?.slug);
 
-        if (!slug) return res.status(400).json({ error: "Slug is required" });
-        if (isReservedSlug(slug)) return res.status(400).json({ error: "Slug is reserved" });
+      if (!slug) return res.status(400).json({ error: "Slug is required" });
+      if (isReservedSlug(slug)) return res.status(400).json({ error: "Slug is reserved" });
 
-        updateDoc.name = name;
-        updateDoc.slug = slug;
+      updateDoc.name = name;
+      updateDoc.slug = slug;
 
-        if (typeof req.body?.limits !== "undefined") {
-          updateDoc.limits = isPlainObject(req.body.limits) ? req.body.limits : {};
-        }
+      if (typeof req.body?.limits !== "undefined") {
+        updateDoc.limits = isPlainObject(req.body.limits) ? req.body.limits : {};
       }
-
-      // both admin + manager allowed
-      if (typeof req.body?.sections !== "undefined") {
-        updateDoc.sections = Array.isArray(req.body.sections) ? req.body.sections : [];
-      }
-      if (typeof req.body?.nav !== "undefined") {
-        updateDoc.nav = req.body?.nav && typeof req.body.nav === "object" ? req.body.nav : null;
-      }
-      if (typeof req.body?.footer !== "undefined") {
-        updateDoc.footer = req.body?.footer && typeof req.body.footer === "object" ? req.body.footer : null;
-      }
-      if (typeof req.body?.whatsapp !== "undefined") {
-        updateDoc.whatsapp = req.body?.whatsapp && typeof req.body.whatsapp === "object" ? req.body.whatsapp : null;
-      }
-      if (typeof req.body?.general !== "undefined") {
-        updateDoc.general = isPlainObject(req.body.general) ? req.body.general : {};
-      }
-
-      const updated = await Page.findByIdAndUpdate(id, updateDoc, {
-        new: true,
-        runValidators: true,
-      });
-
-      if (!updated) return res.status(404).json({ error: "Not found" });
-      res.json(toClientPage(updated));
-    } catch (e) {
-      if (e?.code === 11000) return res.status(409).json({ error: "Slug already exists" });
-      console.error(e);
-      res.status(500).json({ error: "Server error" });
     }
+
+    if (typeof req.body?.sections !== "undefined") {
+      updateDoc.sections = Array.isArray(req.body.sections) ? req.body.sections : [];
+    }
+    if (typeof req.body?.nav !== "undefined") {
+      updateDoc.nav = req.body?.nav && typeof req.body.nav === "object" ? req.body.nav : null;
+    }
+    if (typeof req.body?.footer !== "undefined") {
+      updateDoc.footer = req.body?.footer && typeof req.body.footer === "object" ? req.body.footer : null;
+    }
+    if (typeof req.body?.whatsapp !== "undefined") {
+      updateDoc.whatsapp = req.body?.whatsapp && typeof req.body.whatsapp === "object" ? req.body.whatsapp : null;
+    }
+    if (typeof req.body?.general !== "undefined") {
+      updateDoc.general = isPlainObject(req.body.general) ? req.body.general : {};
+    }
+
+    const updated = await Page.findByIdAndUpdate(id, updateDoc, {
+      new: true,
+      runValidators: true,
+    });
+
+    if (!updated) return res.status(404).json({ error: "Not found" });
+    res.json(toClientPage(updated));
+  } catch (e) {
+    if (e?.code === 11000) return res.status(409).json({ error: "Slug already exists" });
+    console.error(e);
+    res.status(500).json({ error: "Server error" });
   }
-);
+});
 
 // Delete page (admin only)
 app.delete("/api/pages/:id", requireAuth, requireRole("admin"), async (req, res) => {
