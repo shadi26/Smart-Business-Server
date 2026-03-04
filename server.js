@@ -183,6 +183,16 @@ const PageSchema = new mongoose.Schema(
     whatsapp: { type: BlockSchema, default: null },
     general: { type: mongoose.Schema.Types.Mixed, default: {} },
     limits: { type: mongoose.Schema.Types.Mixed, default: {} },
+
+    // ✅ NEW: single-editor lock (admin OR manager)
+    editLock: {
+      userId: { type: String, default: null },
+      email: { type: String, default: "" },
+      role: { type: String, default: "" }, // "admin" | "manager"
+      startedAt: { type: Date, default: null },
+      heartbeatAt: { type: Date, default: null },
+      expiresAt: { type: Date, default: null },
+    },
   },
   { timestamps: true, collection: "pages" }
 );
@@ -253,6 +263,9 @@ function toClientPage(doc) {
     updatedAt: obj.updatedAt,
     general: obj.general || {},
     limits: obj.limits || {},
+
+    // (optional to return; not required on client)
+    editLock: obj.editLock || null,
   };
 }
 
@@ -349,6 +362,7 @@ app.post("/api/auth/login", async (req, res) => {
     res.status(500).json({ error: "Server error" });
   }
 });
+
 app.get("/api/auth/me", requireAuth, async (req, res) => {
   try {
     const user = await User.findById(req.user.id).select("-password");
@@ -449,6 +463,158 @@ app.get("/api/pages/slug/:slug", async (req, res) => {
   if (!doc) return res.status(404).json({ error: "Not found" });
   res.json(toClientPage(doc));
 });
+
+// ---------------- Edit Lock (single editor) ----------------
+// ✅ This is the new feature that prevents admin+manager editing together.
+
+const LOCK_TTL_MS = 2 * 60 * 1000; // 2 minutes
+const HEARTBEAT_EVERY_MS = 25 * 1000;
+
+function cleanLock(lock) {
+  if (!lock) return null;
+  return {
+    email: lock.email || "",
+    role: lock.role || "",
+    startedAt: lock.startedAt || null,
+    expiresAt: lock.expiresAt || null,
+  };
+}
+
+function buildLockForUser(req) {
+  const now = new Date();
+  return {
+    userId: String(req.user.id),
+    email: String(req.user.email || ""),
+    role: String(req.user.role || ""),
+    startedAt: now,
+    heartbeatAt: now,
+    expiresAt: new Date(Date.now() + LOCK_TTL_MS),
+  };
+}
+
+function emptyLock() {
+  return {
+    userId: null,
+    email: "",
+    role: "",
+    startedAt: null,
+    heartbeatAt: null,
+    expiresAt: null,
+  };
+}
+
+// Acquire lock (atomic)
+app.post(
+  "/api/pages/:id/edit-lock/acquire",
+  requireAuth,
+  requirePageAccessByIdParam("id"),
+  async (req, res) => {
+    try {
+      const pageId = req.params.id;
+      const now = new Date();
+      const myUserId = String(req.user.id);
+
+      const updated = await Page.findOneAndUpdate(
+        {
+          _id: pageId,
+          $or: [
+            { editLock: null },
+            { "editLock.userId": null },
+            { "editLock.expiresAt": { $lte: now } },
+            { "editLock.userId": myUserId },
+          ],
+        },
+        { $set: { editLock: buildLockForUser(req) } },
+        { new: true }
+      ).lean();
+
+      if (!updated) {
+        const existing = await Page.findById(pageId).select("editLock").lean();
+        return res.status(423).json({
+          error: "Page is locked",
+          locked: true,
+          lock: cleanLock(existing?.editLock),
+        });
+      }
+
+      return res.json({
+        ok: true,
+        locked: false,
+        lock: cleanLock(updated.editLock),
+        heartbeatEveryMs: HEARTBEAT_EVERY_MS,
+      });
+    } catch (e) {
+      console.error("ACQUIRE LOCK ERROR:", e);
+      res.status(500).json({ error: "Server error" });
+    }
+  }
+);
+
+// Heartbeat (extend TTL)
+app.post(
+  "/api/pages/:id/edit-lock/heartbeat",
+  requireAuth,
+  requirePageAccessByIdParam("id"),
+  async (req, res) => {
+    try {
+      const pageId = req.params.id;
+      const now = new Date();
+      const myUserId = String(req.user.id);
+
+      const updated = await Page.findOneAndUpdate(
+        {
+          _id: pageId,
+          "editLock.userId": myUserId,
+          "editLock.expiresAt": { $gt: now },
+        },
+        {
+          $set: {
+            "editLock.heartbeatAt": now,
+            "editLock.expiresAt": new Date(Date.now() + LOCK_TTL_MS),
+          },
+        },
+        { new: true }
+      ).lean();
+
+      if (!updated) {
+        return res.status(409).json({ error: "Lock lost" });
+      }
+
+      return res.json({
+        ok: true,
+        expiresAt: updated.editLock?.expiresAt || null,
+        heartbeatEveryMs: HEARTBEAT_EVERY_MS,
+      });
+    } catch (e) {
+      console.error("HEARTBEAT ERROR:", e);
+      res.status(500).json({ error: "Server error" });
+    }
+  }
+);
+
+// Release lock
+app.post(
+  "/api/pages/:id/edit-lock/release",
+  requireAuth,
+  requirePageAccessByIdParam("id"),
+  async (req, res) => {
+    try {
+      const pageId = req.params.id;
+      const myUserId = String(req.user.id);
+
+      await Page.findOneAndUpdate(
+        { _id: pageId, "editLock.userId": myUserId },
+        { $set: { editLock: emptyLock() } },
+        { new: true }
+      ).lean();
+
+      return res.json({ ok: true });
+    } catch (e) {
+      console.error("RELEASE LOCK ERROR:", e);
+      res.status(500).json({ error: "Server error" });
+    }
+  }
+);
 
 // Sections patch (admin any, manager only own)
 app.patch(
@@ -681,6 +847,7 @@ app.post("/api/pages", requireAuth, requireRole("admin"), async (req, res) => {
       visible,
       general,
       limits,
+      editLock: emptyLock(),
     });
 
     res.status(201).json(toClientPage(doc));
