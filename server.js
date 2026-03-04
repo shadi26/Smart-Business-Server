@@ -615,7 +615,34 @@ app.post(
     }
   }
 );
+// ✅ Admin-only: force take over the edit lock (kicks current editor)
+app.post(
+  "/api/pages/:id/edit-lock/force",
+  requireAuth,
+  requireRole("admin"),
+  async (req, res) => {
+    try {
+      const pageId = req.params.id;
 
+      const updated = await Page.findByIdAndUpdate(
+        pageId,
+        { $set: { editLock: buildLockForUser(req) } }, // overwrite lock no matter what
+        { new: true }
+      ).lean();
+
+      if (!updated) return res.status(404).json({ error: "Not found" });
+
+      return res.json({
+        ok: true,
+        lock: cleanLock(updated.editLock),
+        heartbeatEveryMs: HEARTBEAT_EVERY_MS,
+      });
+    } catch (e) {
+      console.error("FORCE LOCK ERROR:", e);
+      res.status(500).json({ error: "Server error" });
+    }
+  }
+);
 // Sections patch (admin any, manager only own)
 app.patch(
   "/api/pages/:id/sections/:sectionId",
