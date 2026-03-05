@@ -11,6 +11,7 @@ import { randomUUID } from "crypto";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import languageRoutes from "./routes/language.js";
+import languageAdminRoutes from "./routes/languageAdmin.js";
 
 dotenv.config();
 
@@ -25,6 +26,7 @@ const UPLOADS_DIR = path.join(process.cwd(), "uploads");
 if (!fs.existsSync(UPLOADS_DIR)) fs.mkdirSync(UPLOADS_DIR, { recursive: true });
 app.use("/uploads", express.static(UPLOADS_DIR));
 app.use("/api/language", languageRoutes);
+
 
 // ---------------- Auth middleware ----------------
 const authMiddleware = (req, res, next) => {
@@ -45,12 +47,19 @@ const authMiddleware = (req, res, next) => {
 
 const requireAuth = authMiddleware;
 
+
+
 const requireRole = (...roles) => (req, res, next) => {
   const role = req.user?.role;
   if (!role) return res.status(401).json({ error: "Unauthorized" });
   if (!roles.includes(role)) return res.status(403).json({ error: "Forbidden" });
   next();
 };
+
+app.use(
+  "/api/language/admin",
+  languageAdminRoutes
+);
 
 // Admin can access everything.
 // Manager can only access their own page id.
