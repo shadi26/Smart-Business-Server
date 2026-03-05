@@ -474,9 +474,9 @@ app.get("/api/pages/slug/:slug", async (req, res) => {
 });
 
 // ---------------- Edit Lock (single editor) ----------------
-// ✅ This is the new feature that prevents admin+manager editing together.
+// This is the new feature that prevents admin+manager editing together.
 
-const LOCK_TTL_MS = 2 * 60 * 1000; // 2 minutes
+const LOCK_TTL_MS = 10 * 60 * 1000; // 2 minutes
 const HEARTBEAT_EVERY_MS = 25 * 1000;
 
 function cleanLock(lock) {
