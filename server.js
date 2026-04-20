@@ -12,6 +12,7 @@ import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import languageRoutes from "./routes/language.js";
 import languageAdminRoutes from "./routes/languageAdmin.js";
+import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
 
 dotenv.config();
 
@@ -20,6 +21,15 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: "2mb" }));
 app.set("trust proxy", 1);
+
+const spaces = new S3Client({
+  region: process.env.DO_SPACES_REGION,
+  endpoint: process.env.DO_SPACES_ENDPOINT,
+  credentials: {
+    accessKeyId: process.env.DO_SPACES_KEY,
+    secretAccessKey: process.env.DO_SPACES_SECRET,
+  },
+});
 
 // ---------------- Uploads directory ----------------
 const UPLOADS_DIR = path.join(process.cwd(), "uploads");
@@ -117,7 +127,6 @@ app.post(
       const effort = clampInt(req.body?.effort, 0, 6) ?? preset.effort ?? 4;
 
       const filename = `${randomUUID()}.webp`;
-      const outPath = path.join(UPLOADS_DIR, filename);
 
       const pipeline = sharp(req.file.buffer, { failOn: "none" })
         .rotate()
@@ -127,20 +136,29 @@ app.post(
           fit: "inside",
         });
 
-      const info = preset.lossless
-        ? await pipeline.webp({ lossless: true, effort }).toFile(outPath)
-        : await pipeline.webp({ quality, effort, smartSubsample: true }).toFile(outPath);
+      const outputBuffer = preset.lossless
+        ? await pipeline.webp({ lossless: true, effort }).toBuffer()
+        : await pipeline.webp({ quality, effort, smartSubsample: true }).toBuffer();
 
-      const baseUrl = `${req.protocol}://${req.get("host")}`;
-      const url = `${baseUrl}/uploads/${filename}`;
+      await spaces.send(
+        new PutObjectCommand({
+          Bucket: process.env.DO_SPACES_BUCKET,
+          Key: filename,
+          Body: outputBuffer,
+          ACL: "public-read",
+          ContentType: "image/webp",
+          CacheControl: "public, max-age=31536000, immutable",
+        })
+      );
+
+      const cdnBase = process.env.DO_SPACES_CDN;
+      const url = `${cdnBase}/${filename}`;
 
       res.json({
         url,
         filename,
         kind: kindRaw,
-        width: info?.width,
-        height: info?.height,
-        bytes: info?.size,
+        bytes: outputBuffer.length,
       });
     } catch (e) {
       console.error(e);
