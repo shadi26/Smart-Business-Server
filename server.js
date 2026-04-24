@@ -128,6 +128,14 @@ app.post(
 
       const filename = `${randomUUID()}.webp`;
 
+      const pageId = String(req.body?.pageId || req.user?.pageId || "").trim();
+
+      if (!pageId) {
+        return res.status(400).json({ error: "pageId is required" });
+      }
+
+      const fileKey = `pages/${pageId}/${kindRaw}/${filename}`;
+
       const pipeline = sharp(req.file.buffer, { failOn: "none" })
         .rotate()
         .resize({
@@ -143,7 +151,7 @@ app.post(
       await spaces.send(
         new PutObjectCommand({
           Bucket: process.env.DO_SPACES_BUCKET,
-          Key: filename,
+          Key: fileKey,
           Body: outputBuffer,
           ACL: "public-read",
           ContentType: "image/webp",
@@ -152,7 +160,7 @@ app.post(
       );
 
       const cdnBase = process.env.DO_SPACES_CDN;
-      const url = `${cdnBase}/${filename}`;
+      const url = `${cdnBase}/${fileKey}`;
 
       res.json({
         url,
