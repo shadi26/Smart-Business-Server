@@ -13,9 +13,12 @@ import jwt from "jsonwebtoken";
 import languageRoutes from "./routes/language.js";
 import languageAdminRoutes from "./routes/languageAdmin.js";
 import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
-
+import OpenAI from "openai";
+import { AI_TEMPLATE_GUIDE } from "./shared/aiTemplateGuide.js";
 dotenv.config();
-
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+});
 const app = express();
 
 app.use(cors());
@@ -974,7 +977,451 @@ app.put("/api/pages/:id", requireAuth, requirePageAccessByIdParam("id"), async (
     res.status(500).json({ error: "Server error" });
   }
 });
+const DEFAULT_DEVELOPER = {
+  developedByText: "Developed by",
+  developerName: "vynix.net",
+  developerLink: "https://vynix.net",
+  developerWebsite: "https://vynix.net",
+};
 
+function fillMissingFields(target = {}, fields = [], fallback = "") {
+  const next = isPlainObject(target) ? { ...target } : {};
+
+  for (const field of fields || []) {
+    if (typeof next[field] === "undefined" || next[field] === null) {
+      next[field] = fallback;
+    }
+  }
+
+  return next;
+}
+
+function normalizeAiBlock(block, guide, ctx, blockType = "") {
+  const template = block?.template || "template1";
+  const templateGuide = guide?.[template] || {};
+
+  const config = fillMissingFields(block?.config, templateGuide.configFields, "");
+  const style = fillMissingFields(block?.style, templateGuide.styleFields, "#111111");
+
+  config.direction = ctx.direction;
+
+if (blockType === "nav") {
+  config.showLogin = true;
+  config.showManagerLogin = true;
+
+  config.loginButtonText = "Manager Login";
+  config.managerButtonText = "Manager Login";
+
+  // Your NavSection1 opens a login modal, so loginTargetRoute is not used for opening login.
+  config.loginTargetRoute = "";
+
+  // This is used after manager is already logged in and clicks Edit.
+  config.managerTargetRoute = `/${ctx.slug}/manager`;
+  config.editTargetRoute = `/${ctx.slug}/manager`;
+
+  config.showEditButton = true;
+  config.editButtonText = "Edit";
+}
+
+  if (blockType === "footer") {
+config.privacyLinkText =
+  config.privacyLinkText || "Privacy, Terms & Accessibility";
+
+config.privacyTitle =
+  config.privacyTitle ||
+  "Privacy Policy, Terms of Use & Accessibility Statement";
+
+config.privacyContent =
+  config.privacyContent ||
+  `Privacy Policy, Terms of Use & Accessibility Statement
+
+This website is committed to protecting user privacy, providing fair terms of use, and improving accessibility for all visitors.
+
+The website may collect contact details submitted through forms, WhatsApp, phone calls, or other contact options, only for the purpose of responding to inquiries and providing business services.
+
+Users are requested not to submit sensitive personal information through public contact forms.
+
+Accessibility Statement
+
+This website aims to provide an accessible browsing experience for all users, including people with disabilities.
+
+Accessibility improvements are made with reference to WCAG 2.1 Level AA where reasonably applicable.
+
+The website currently includes the following accessibility tools:
+✔ Increase text size
+✔ Decrease text size
+✔ Grayscale mode
+✔ High contrast mode
+✔ Reset accessibility settings
+
+Accessibility is an ongoing process. We are doing our best to implement additional accessibility improvements over time.
+
+Despite our efforts, some parts of the website may not yet be fully accessible.
+
+If you encounter an accessibility issue, require assistance, or have suggestions for improving accessibility, please contact us through the business contact details or hotline. We will do our best to provide an appropriate solution as quickly as possible.
+
+Hebrew Version / גרסה בעברית
+
+מדיניות פרטיות, תנאי שימוש והצהרת נגישות
+
+אתר זה מחויב לשמירה על פרטיות המשתמשים, לקביעת תנאי שימוש הוגנים ולשיפור הנגישות לכלל המבקרים.
+
+האתר עשוי לאסוף פרטי התקשרות שנמסרים דרך טפסים, WhatsApp, שיחות טלפון או אמצעי יצירת קשר אחרים, אך ורק לצורך מענה לפניות ומתן שירותי העסק.
+
+המשתמשים מתבקשים שלא למסור מידע אישי רגיש דרך טפסי יצירת קשר ציבוריים.
+
+הצהרת נגישות
+
+אתר זה שואף לספק חוויית שימוש נגישה ונוחה לכלל המשתמשים, לרבות אנשים עם מוגבלויות.
+
+שיפורי הנגישות באתר מבוצעים תוך התייחסות להנחיות WCAG 2.1 ברמה AA, ככל שהדבר ניתן באופן סביר ובהתאם ליכולות הטכנולוגיות הקיימות.
+
+באתר קיימים כלי נגישות הכוללים:
+✔ הגדלת טקסט
+✔ הקטנת טקסט
+✔ מצב גווני אפור
+✔ ניגודיות גבוהה
+✔ איפוס הגדרות נגישות
+
+נגישות היא תהליך מתמשך. אנו עושים את מירב המאמצים ליישם שיפורי נגישות נוספים לאורך הזמן.
+
+למרות מאמצינו, ייתכן שחלקים מסוימים באתר עדיין אינם נגישים באופן מלא.
+
+אם נתקלתם בבעיה בנושא נגישות, זקוקים לסיוע או מעוניינים להעביר הערה, ניתן ליצור קשר באמצעות פרטי ההתקשרות של העסק או דרך מוקד התמיכה. אנו נעשה כמיטב יכולתנו לספק מענה מתאים בהקדם האפשרי.`;
+  config.developedByText = DEFAULT_DEVELOPER.developedByText;
+    config.developerName = DEFAULT_DEVELOPER.developerName;
+    config.developerLink = DEFAULT_DEVELOPER.developerLink;
+    config.developerWebsite = DEFAULT_DEVELOPER.developerWebsite;
+  }
+
+  return {
+    enabled: block?.enabled !== false,
+    template,
+    config,
+    style,
+  };
+}
+
+function normalizeAiSection(section, ctx) {
+  const type = section?.type;
+  let template = section?.template || "template1";
+
+  if (type === "locationsection" && template === "template3") {
+    template = "template2";
+  }
+
+  const guide = AI_TEMPLATE_GUIDE?.[type]?.[template];
+  if (!type || !guide) return null;
+
+  const config = fillMissingFields(section?.config, guide.configFields, "");
+  const style = fillMissingFields(section?.style, guide.styleFields, "#111111");
+
+  config.direction = ctx.direction;
+
+  if (type === "cta" && ctx.phone) {
+    config.businessPhone = config.businessPhone || ctx.phone;
+    config.whatsappNumber = config.whatsappNumber || ctx.phone;
+  }
+
+  return {
+    id: section?.id || `${type}-${randomUUID().slice(0, 8)}`,
+    type,
+    template,
+    enabled: section?.enabled !== false,
+    config,
+    style,
+  };
+}
+
+function normalizeAiDesign(generated, ctx) {
+  const sections = Array.isArray(generated?.sections)
+    ? generated.sections.map((s) => normalizeAiSection(s, ctx)).filter(Boolean)
+    : [];
+
+return {
+  nav: normalizeAiBlock(generated?.nav, AI_TEMPLATE_GUIDE.navsection, ctx, "nav"),
+  sections,
+  footer: normalizeAiBlock(generated?.footer, AI_TEMPLATE_GUIDE.footersection, ctx, "footer"),
+};
+}
+
+app.post(
+  "/api/pages/:id/ai-design",
+  requireAuth,
+  requirePageAccessByIdParam("id"),
+  async (req, res) => {
+    try {
+      const pageId = req.params.id;
+
+      const page = await Page.findById(pageId).lean();
+      if (!page) return res.status(404).json({ error: "Page not found" });
+
+      const businessDetails = String(req.body?.businessDetails || "").trim();
+      const language = String(req.body?.language || page?.general?.language || "en").trim();
+      const direction = language === "ar" || language === "he" ? "rtl" : "ltr";
+
+      if (!businessDetails) {
+        return res.status(400).json({ error: "Business details are required" });
+      }
+
+    const logoUrl = String(req.body?.logoUrl || page?.general?.logoUrl || "").trim();
+    const businessName = String(page?.name || "Business").trim();
+    const phone = String(req.body?.phone || page?.general?.phone || "").trim();
+    const city = String(req.body?.city || page?.general?.city || "").trim();
+
+      const schema = {
+        type: "object",
+        additionalProperties: false,
+        required: ["nav", "sections", "footer"],
+        properties: {
+          nav: { type: "object" },
+          sections: {
+            type: "array",
+            items: { type: "object" },
+          },
+          footer: { type: "object" },
+        },
+      };
+
+const templateGuideText = JSON.stringify(AI_TEMPLATE_GUIDE, null, 2);
+
+const prompt = `
+You are generating a complete SmartBusiness landing page.
+
+Available templates and required fields:
+${templateGuideText}
+
+Business name:
+${businessName}
+
+Business details:
+${businessDetails}
+
+Logo URL:
+${logoUrl || "No logo"}
+
+Phone:
+${phone || "No phone"}
+
+City:
+${city || "No city"}
+
+Language:
+${language}
+
+Direction:
+${direction}
+
+Analyze the business:
+- industry
+- target audience
+- premium vs budget positioning
+- modern vs classic style
+- local vs international feel
+- luxury vs casual tone
+
+Return ONLY valid JSON.
+
+Rules:
+- Generate between 3 and 6 sections.
+- Never generate fewer than 3 sections.
+- Never generate more than 6 sections.
+- Hero must always be first.
+- CTA must always be last.
+- Build one complete page, not random separate sections.
+- Generate one consistent color system for the whole page.
+- Use the logo colors as inspiration when logo is available.
+- Nav, sections, and footer must look compatible together.
+- Every selected section config must include ALL configFields from AI_TEMPLATE_GUIDE for its selected type/template.
+- Every selected section style must include ALL styleFields from AI_TEMPLATE_GUIDE for its selected type/template.
+- Every item array must follow itemShape exactly.
+- Do not omit fields.
+- If a value is unknown, use a safe default: empty array, empty string, false, or suitable fallback text.
+- Use one consistent color palette across nav, sections, footer, cards, buttons, and accents.
+- If logo is available, infer its main colors and use them as the primary design palette.
+Content filling rules:
+- Use the business details as the main source of truth.
+- Rewrite the business details into professional landing-page copy.
+- Do not copy the same paragraph into every section.
+- Split the information across the page:
+  hero = strongest short promise
+  features = reasons, benefits, advantages
+  serviceSection = products, services, offers, packages, or main solutions
+  gallery = visual/product/project showcase
+  testimonials = facts, proof points, results, or trust signals, not fake reviews
+  locationsection = location, service area, contact presence, or visit/contact info
+  cta = final action and WhatsApp/contact messages
+- If the business sells products, serviceSection should describe the main products/offers.
+- If the business is service-based, serviceSection should describe the services.
+- Do not invent exact prices, addresses, certifications, guarantees, awards, or opening hours unless included in the business details.
+- If phone exists, fill businessPhone and whatsappNumber with the phone.
+- If city exists, use it in location/contact text.
+- For Arabic, write natural Arabic marketing text and set every config.direction to "rtl".
+- For Hebrew, write natural Hebrew marketing text and set every config.direction to "rtl".
+- For English, write natural English marketing text and set every config.direction to "ltr".
+- Do not invent fake reviews.
+- If testimonials are not suitable, use testimonials as facts/results.
+- Use only these section types from the guide:
+  hero, features, serviceSection, gallery, testimonials, cta, locationsection
+- Do not use section type "location". Use "locationsection" only.
+- Use only template1, template2, template3 for normal sections.
+- The AI must choose the most suitable sections and templates based on the business.
+- Do not include every section type automatically.
+- Use only sections that make sense for this business.
+- For locationsection, use only template1 or template2.
+- Never use locationsection template3.
+- Use a mix of templates when suitable.
+- Do not use the same template for every section.
+- For premium businesses, prefer hero template2 or template3.
+- For visual businesses, prefer gallery template3.
+- For WhatsApp/phone conversion, prefer cta template2.
+- Recommended page flow:
+  hero -> features/serviceSection -> gallery/testimonials/locationsection -> cta
+- Every section must include: id, type, template, enabled, config, style.
+- Also return nav and footer.
+- Nav and footer must include enabled, template, config, style.
+- For internal links use:
+  /{slug}
+  #features
+  #services
+  #gallery
+  #location
+  #contact
+- CTA WhatsApp link/phone should use the business phone if available.
+Footer and navbar fixed rules:
+- Footer developer credit must always be:
+  developedByText: "Developed by"
+  developerName: "vynix.net"
+  developerLink: "https://vynix.net"
+  developerWebsite: "https://vynix.net"
+
+- Footer privacyLinkText must be:
+  "Privacy, Terms & Accessibility"
+- Footer privacyTitle must be:
+  "Privacy Policy, Terms of Use & Accessibility Statement"
+- Footer privacyContent must be written specifically for the business described in Business Details.
+- Mention the business name naturally.
+- Mention the business services/products where relevant.
+- Do not use generic placeholder wording.
+- Create a real business privacy policy, terms of use, and accessibility statement.
+- privacyContent must combine:
+  1. Privacy Policy
+  2. Terms of Use
+  3. Accessibility Statement
+
+Accessibility statement requirements:
+
+- State that the business is committed to providing an accessible experience for all users, including people with disabilities.
+
+- State that accessibility improvements are implemented with reference to WCAG 2.1 Level AA guidelines where reasonably applicable.
+
+- Mention only the accessibility features actually available on this website:
+  ✔ Increase text size
+  ✔ Decrease text size
+  ✔ Grayscale mode
+  ✔ High contrast mode
+  ✔ Reset accessibility settings
+
+- State that accessibility is an ongoing process and that additional accessibility improvements may be added over time.
+
+- State that despite ongoing efforts, some parts of the website may not yet be fully accessible.
+
+- Encourage users to contact the business if they encounter an accessibility issue or require assistance.
+
+- Include a support/help section using the business contact information when available.
+
+- Include wording similar to:
+  "If you encounter an accessibility issue, require assistance, or have suggestions for improving accessibility, we encourage you to contact us and we will do our best to provide an appropriate solution as quickly as possible."
+
+- Do not claim accessibility features that are not implemented.
+
+- privacyContent must be written in the selected page language first.
+- If the selected language is Hebrew ("he"), Hebrew is enough.
+- If the selected language is Arabic ("ar") or English ("en"), privacyContent must also include a full Hebrew version underneath the selected-language version.
+- The Hebrew version must be titled:
+  "גרסה בעברית"
+- The Hebrew version must include:
+  "מדיניות פרטיות, תנאי שימוש והצהרת נגישות"
+- Privacy policy and terms of use must be written specifically for the business and not as generic placeholder text.
+
+- Navbar must always include manager login.
+- Nav config showLogin and showManagerLogin must be true.
+- Manager login uses a modal popup.
+- loginTargetRoute may be empty.
+- managerTargetRoute must be "/{slug}/manager".
+- editTargetRoute must be "/{slug}/manager".
+- showEditButton must be true.
+Each section must follow:
+{
+  "id": "section-unique-name",
+  "type": "hero",
+  "template": "template2",
+  "enabled": true,
+  "config": {},
+  "style": {}
+}
+
+Nav must follow:
+{
+  "enabled": true,
+  "template": "template1",
+  "config": {},
+  "style": {}
+}
+
+Footer must follow:
+{
+  "enabled": true,
+  "template": "template1",
+  "config": {},
+  "style": {}
+}
+`;
+
+      const response = await openai.responses.create({
+        model: "gpt-5.5",
+        input: [
+          {
+            role: "user",
+            content: logoUrl
+              ? [
+                  { type: "input_text", text: prompt },
+                  { type: "input_image", image_url: logoUrl },
+                ]
+              : prompt,
+          },
+        ],
+        text: {
+          format: {
+            type: "json_schema",
+            name: "smartbusiness_ai_design",
+            schema,
+            strict: false,
+          },
+        },
+      });
+const text = response.output_text;
+const generated = JSON.parse(text);
+
+const normalized = normalizeAiDesign(generated, {
+  direction,
+  businessName,
+  phone,
+  city,
+  logoUrl,
+  slug: page.slug,
+});
+
+res.json({
+  ok: true,
+  design: normalized,
+});
+    } catch (e) {
+      console.error("AI DESIGN ERROR:", e);
+      res.status(500).json({ error: "AI design generation failed" });
+    }
+  }
+);
 // Delete page (admin only)
 app.delete("/api/pages/:id", requireAuth, requireRole("admin"), async (req, res) => {
   try {
